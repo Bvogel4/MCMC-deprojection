@@ -12,6 +12,9 @@ import time
 from multiprocessing import Pool
 from scipy.special import factorial as scipy_factorial
 import pickle
+#supress warning from emcee
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="emcee")
 
 
 def random_viewing_angles(n):
@@ -324,7 +327,7 @@ def log_likelihood(params, q_obs):
 
 
 
-def infer_intrinsic_shape(q_obs, n_walkers=32, n_steps=3000, burn_in=500,
+def infer_intrinsic_shape(q_obs, n_walkers=128, n_steps=5000, burn_in=500,
                           n_cores=None, output_prefix=None, output_dir="results"):
     """
     Infer the intrinsic shape distribution from observed projected axis ratios.
@@ -369,7 +372,20 @@ def infer_intrinsic_shape(q_obs, n_walkers=32, n_steps=3000, burn_in=500,
     #start all walkers at the same initial guess
     pos = np.array([[mu_B, mu_C, sigma_B, sigma_C] for _ in range(n_walkers)])
     #add a little variation to each walker
-    pos += 0.1 * np.random.randn(n_walkers, ndim)
+    # Define separate variation scales for means and sigmas
+    mu_variation = 0.05  # Less variation for mu parameters
+    sigma_variation = 0.2  # More variation for sigma parameters
+
+    # Create random variations with appropriate scales for each parameter
+    variations = np.zeros((n_walkers, ndim))
+    variations[:, 0] = mu_variation * np.random.randn(n_walkers)  # mu_B
+    variations[:, 1] = mu_variation * np.random.randn(n_walkers)  # mu_C
+    variations[:, 2] = sigma_variation * np.random.randn(n_walkers)  # sigma_B
+    variations[:, 3] = sigma_variation * np.random.randn(n_walkers)  # sigma_C
+
+    # Add variations to positions
+    pos = np.array([[mu_B, mu_C, sigma_B, sigma_C] for _ in range(n_walkers)])
+    pos += variations
     #ensure walkers are within physical limits
     for i in range(n_walkers):
         if pos[i, 0] > 1:
@@ -380,6 +396,10 @@ def infer_intrinsic_shape(q_obs, n_walkers=32, n_steps=3000, burn_in=500,
             pos[i, 2] = 0.5
         if pos[i, 3] > 0.5:
             pos[i, 3] = 0.5
+        if pos[i, 2] < 0:
+            pos[i, 2] = 0
+        if pos[i, 3] < 0:
+            pos[i, 3] = 0
         if pos[i, 0] < pos[i, 1]:
             pos[i,0],pos[i,1] = pos[i,1],pos[i,0]
 

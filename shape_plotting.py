@@ -103,6 +103,8 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
     Returns:
         figure: Ellipsoid shapes plot figure
     """
+
+
     fig, ax = plt.subplots(figsize=(10, 8))
 
     # Plot diagonal line at B/A = C/A
@@ -123,6 +125,7 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
     # For each ellipsoid shape
     for i, (samples, max_prob, true_params, label, color) in enumerate(zip(
             samples_list, max_prob_list, true_params_list, labels, colors)):
+        label = label.split('.')[0]
 
         # Extract B/A and C/A values
         B_A_samples = samples[:, 0]
@@ -157,19 +160,20 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
         if show_ellipses:
             from matplotlib.patches import Ellipse
             #plot true ellipses for sigma_B and sigma_C
-            sigma_B = true_params[2]
-            sigma_C = true_params[3]
-            #add ellipses to plot
-            # one has a value over 0.05, and the ratio of the smallest to the largest is not too extreme (<10)
-            if sigma_B > 0.05 or sigma_C > 0.05 and (sigma_B/sigma_C < 10 and sigma_C/sigma_B < 10):
+            if true_params is not None:
+                sigma_B = true_params[2]
+                sigma_C = true_params[3]
                 #add ellipses to plot
-                ellipse = Ellipse(xy=(true_params[0], true_params[1]),
-                                  width=2 * sigma_B, height=2 * sigma_C,
-                                  edgecolor=color, facecolor='none', linestyle=':', alpha=0.5,label =f"{label} (True Variance Ellipse)")
-                ax.add_patch(ellipse)
-                print(f'adding true ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
-            else:
-                print(f'skipping true ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
+                # one has a value over 0.05, and the ratio of the smallest to the largest is not too extreme (<10)
+                if sigma_B > 0.05 or sigma_C > 0.05 and (sigma_B/sigma_C < 10 and sigma_C/sigma_B < 10):
+                    #add ellipses to plot
+                    ellipse = Ellipse(xy=(true_params[0], true_params[1]),
+                                      width=2 * sigma_B, height=2 * sigma_C,
+                                      edgecolor=color, facecolor='none', linestyle=':', alpha=0.5,label =f"{label} (True Variance Ellipse)")
+                    ax.add_patch(ellipse)
+                #     print(f'adding true ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
+                # else:
+                #     print(f'skipping true ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
 
 
             # plot error ellipses from sigma_B and sigma_C output from the MCMC
@@ -183,9 +187,9 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
                                   width=2 * sigma_B, height=2 * sigma_C,
                                   edgecolor=color, facecolor='none', linestyle='--', alpha=0.5, label=f"{label} (Inferred Variance Ellipse)")
                 ax.add_patch(ellipse)
-                print(f'adding inferred ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
-            else:
-                print(f'skipping inferred ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
+            #     print(f'adding inferred ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
+            # else:
+            #     print(f'skipping inferred ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
 
 
     # Set limits and labels
