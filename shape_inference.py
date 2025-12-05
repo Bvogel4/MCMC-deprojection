@@ -466,6 +466,61 @@ def infer_intrinsic_shape(q_obs, n_walkers=128, n_steps=5000, burn_in=500,
 
     return samples, max_prob_params, sampler
 
+def generate_model_projections(params, n_samples=10000):
+    """
+    Generate model projected axis ratios from given parameters.
+
+    Parameters:
+        params (array): [mu_B, mu_C, sigma_B, sigma_C]
+        n_samples (int): Number of model samples to generate
+
+    Returns:
+        array: Model projected axis ratios
+    """
+    mu_B, mu_C, sigma_B, sigma_C = params
+
+    # Generate more samples initially to account for filtering
+    oversample_factor = 2
+    n_initial_samples = int(n_samples * oversample_factor)
+
+    # Create arrays to store B and C values
+    B_samples = np.random.normal(mu_B, sigma_B, n_initial_samples)
+    C_samples = np.random.normal(mu_C, sigma_C, n_initial_samples)
+
+    # Enforce physical constraints: 0 < C <= B <= 1
+    mask = (B_samples > 0) & (B_samples <= 1) & (C_samples > 0) & (C_samples <= B_samples)
+
+    B_samples = B_samples[mask]
+    C_samples = C_samples[mask]
+
+    # If we don't have enough samples after filtering, generate more
+    while len(B_samples) < n_samples:
+        samples_needed = n_samples - len(B_samples)
+        batch_size = min(samples_needed * 2, n_initial_samples)
+
+        B_additional = np.random.normal(mu_B, sigma_B, batch_size)
+        C_additional = np.random.normal(mu_C, sigma_C, batch_size)
+
+        mask = (B_additional > 0) & (B_additional <= 1) & (C_additional > 0) & (C_additional <= B_additional)
+
+        B_samples = np.append(B_samples, B_additional[mask])
+        C_samples = np.append(C_samples, C_additional[mask])
+
+        if len(B_samples) >= n_samples:
+            break
+
+    # Trim to exactly n_samples
+    B_samples = B_samples[:n_samples]
+    C_samples = C_samples[:n_samples]
+
+    # Generate random viewing angles (you'll need to import this function)
+    phi, theta = random_viewing_angles(len(B_samples))
+
+    # Calculate projected axis ratios (you'll need to import this function)
+    q_model = projected_axis_ratio(phi, theta, B_samples, C_samples)
+
+    return q_model
+
 
 def load_results(output_prefix, output_dir="results"):
     """

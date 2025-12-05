@@ -11,7 +11,25 @@ import corner
 from matplotlib.patches import Ellipse
 from scipy.stats import gaussian_kde
 import os
+from shape_inference import generate_model_projections
+from matplotlib.patches import Ellipse
 
+
+# KF observational data
+KF_DATA = {
+    'KF High Mass': {
+        '1R_eff': {'center': (0.863, 0.297), 'std': (0.075, 0.103)},
+        '2R_eff': {'center': (0.91, 0.352), 'std': (0.04, 0.155)}
+    },
+    'KF Medium Mass': {
+        '1R_eff': {'center': (0.857, 0.323), 'std': (0.05, 0.118)},
+        '2R_eff': {'center': (0.902, 0.371), 'std': (0.05, 0.163)}
+    },
+    'KF Low Mass': {
+        '1R_eff': {'center': (0.753, 0.459), 'std': (0.087, 0.194)},
+        '2R_eff': {'center': (0.778, 0.446), 'std': (0.102, 0.213)}
+    }
+}
 
 def plot_corner(samples, max_prob_params, true_params=None, output_file=None, title=None):
     """
@@ -35,7 +53,7 @@ def plot_corner(samples, max_prob_params, true_params=None, output_file=None, ti
         mask = np.all(np.abs(samples - means) < sigma * stds, axis=1)
         return samples[mask]
 
-    samples = filter_outliers(samples)
+    #samples = filter_outliers(samples)
 
     labels = ["B/A", "C/A", r"$\sigma_B$", r"$\sigma_C$"]
 
@@ -43,13 +61,12 @@ def plot_corner(samples, max_prob_params, true_params=None, output_file=None, ti
         samples,
         labels=labels,
         truths=true_params,
-        range=[0.95 for _ in range(len(labels))],  # Focus on 95% of the probability mass
-        quantiles=[0.16, 0.5, 0.84],
+        range=[(0,1),(0,1),(0,0.5),(0,0.5)],
         show_titles=True,
         title_kwargs={"fontsize": 12},
         hist_kwargs={"density": True},
         levels=(0.68, 0.95),  # Show 1-sigma and 2-sigma contours
-        plot_datapoints=False,  # Don't plot the individual points
+        plot_datapoints=True,  # Don't plot the individual points
         fill_contours=True,  # Fill the contours
         smooth=1.0  # Apply some smoothing
     )
@@ -82,7 +99,7 @@ def plot_corner(samples, max_prob_params, true_params=None, output_file=None, ti
 
 
 def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, labels=None,
-                          colors=None, output_file=None, title=None, reference_shapes=True,
+                          color=None, output_file=None, title=None, reference_shapes=True,
                           focus_on_max_prob=True, show_samples=False, show_ellipses=True):
     """
     Plot B/A vs C/A with focus on the maximum probability parameters.
@@ -92,7 +109,7 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
         max_prob_list (list): List of maximum probability parameters
         true_params_list (list): List of true parameters (optional)
         labels (list): List of labels for each ellipsoid shape
-        colors (list): List of colors for each ellipsoid shape
+        color (list): List of colors for each ellipsoid shape
         output_file (str): Path to save the plot (optional)
         title (str): Title for the plot
         reference_shapes (bool): Whether to add reference shapes
@@ -105,14 +122,14 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
     """
 
 
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(8, 8))
 
     # Plot diagonal line at B/A = C/A
-    ax.plot([0, 1], [0, 1], 'k--', alpha=0.5, label="B/A = C/A")
+    ax.plot([0, 1], [0, 1], 'k--', alpha=0.5)
 
-    # Set default colors if not provided
-    if colors is None:
-        colors = plt.cm.tab10.colors[:len(samples_list)]
+    # Set default color if not provided
+    if color is None:
+        color = plt.cm.tab10.colors[:len(samples_list)]
 
     # Set default labels if not provided
     if labels is None:
@@ -124,7 +141,7 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
 
     # For each ellipsoid shape
     for i, (samples, max_prob, true_params, label, color) in enumerate(zip(
-            samples_list, max_prob_list, true_params_list, labels, colors)):
+            samples_list, max_prob_list, true_params_list, labels, color)):
         label = label.split('.')[0]
 
         # Extract B/A and C/A values
@@ -137,79 +154,98 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
 
         # Plot true parameters if provided
         if true_params is not None:
-            ax.scatter(true_params[0], true_params[1], marker='*', s=300, color=color,
-                       edgecolors='white', linewidth=1.5, label=f"{label} (True)", zorder=5)
+            ax.scatter(true_params[0], true_params[1], marker='o', s=75, color='k',
+                       edgecolors='white', linewidth=1.5, zorder=5)
 
         # Plot maximum probability parameters with emphasis
         if focus_on_max_prob:
             # Make the max probability point more prominent
-            ax.scatter(max_prob[0], max_prob[1], marker='o', s=200, color=color,
-                       edgecolors='white', linewidth=2, label=f"{label} (Maximum Likelihood)")
+            ax.scatter(max_prob[0], max_prob[1], marker='o', s=75, color=color,
+                       edgecolors='white', linewidth=2)
 
             # Add a text annotation with the exact values
-            ax.annotate(f"B/A: {max_prob[0]:.3f}\nC/A: {max_prob[1]:.3f}",
-                        xy=(max_prob[0], max_prob[1]),
-                        xytext=(10, 10), textcoords='offset points',
-                        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+            # ax.annotate(f"B/A: {max_prob[0]:.3f}\nC/A: {max_prob[1]:.3f}",
+            #             xy=(max_prob[0], max_prob[1]),
+            #             xytext=(10, 10), textcoords='offset points',
+            #             bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
         else:
             # Standard display of max probability point
-            ax.scatter(max_prob[0], max_prob[1], marker='o', s=150, color=color,
+            ax.scatter(max_prob[0], max_prob[1], marker='o', s=75, color=color,
                        edgecolors='white', linewidth=1, label=f"{label} (Inferred)")
 
-        # Calculate and plot error ellipses if requested
         if show_ellipses:
-            from matplotlib.patches import Ellipse
-            #plot true ellipses for sigma_B and sigma_C
+
+            # plot true ellipses for sigma_B and sigma_C
             if true_params is not None:
                 sigma_B = true_params[2]
                 sigma_C = true_params[3]
-                #add ellipses to plot
+                # add ellipses to plot
                 # one has a value over 0.05, and the ratio of the smallest to the largest is not too extreme (<10)
-                if sigma_B > 0.05 or sigma_C > 0.05 and (sigma_B/sigma_C < 10 and sigma_C/sigma_B < 10):
-                    #add ellipses to plot
+                if sigma_B > 0.05 or sigma_C > 0.05 and (sigma_B / sigma_C < 10 and sigma_C / sigma_B < 10):
+                    # add ellipses to plot
                     ellipse = Ellipse(xy=(true_params[0], true_params[1]),
                                       width=2 * sigma_B, height=2 * sigma_C,
-                                      edgecolor=color, facecolor='none', linestyle=':', alpha=0.5,label =f"{label} (True Variance Ellipse)")
+                                      edgecolor='k', facecolor='none', linestyle=':', alpha=1, linewidth=2.5)
                     ax.add_patch(ellipse)
-                #     print(f'adding true ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
-                # else:
-                #     print(f'skipping true ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
 
+                    # Add dummy label for true ellipse
+                    ax.plot(-1, -1, c='k', linestyle=':', linewidth=2.5,
+                            label=f"Intrinsic Distribution ({label})")
 
             # plot error ellipses from sigma_B and sigma_C output from the MCMC
             sigma_B = max_prob[2]
             sigma_C = max_prob[3]
-            #only add if sigma_B and sigma_C have some physical meaning
+            # only add if sigma_B and sigma_C have some physical meaning
             # one has a value over 0.05, and the ratio of the smallest to the largest is not too extreme (<10)
-            if sigma_B > 0.05 or sigma_C > 0.05 and (sigma_B/sigma_C < 10 and sigma_C/sigma_B < 10):
-                #add ellipses to plot
+            if sigma_B > 0.05 or sigma_C > 0.05 and (sigma_B / sigma_C < 10 and sigma_C / sigma_B < 10):
+                # add ellipses to plot
                 ellipse = Ellipse(xy=(max_prob[0], max_prob[1]),
                                   width=2 * sigma_B, height=2 * sigma_C,
-                                  edgecolor=color, facecolor='none', linestyle='--', alpha=0.5, label=f"{label} (Inferred Variance Ellipse)")
+                                  edgecolor=color, facecolor='none', linestyle='-', alpha=1, linewidth=2.5)
                 ax.add_patch(ellipse)
-            #     print(f'adding inferred ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
-            # else:
-            #     print(f'skipping inferred ellipse for {label} with sigma_B = {sigma_B} and sigma_C = {sigma_C}')
 
+                # Add dummy label for inferred ellipse
+                ax.plot(-1, -1, c=color, linestyle='-', linewidth=2.5,
+                        label=f"Inferred Distribution ({label})")
 
+        # Add data from KF_DATA
+        # colors purple, maroon, lime green
+        ell_colors = {
+            'KF Low Mass': 'indigo',
+            'KF Medium Mass': 'darkred',
+            'KF High Mass': 'limegreen'
+        }
+
+        for mass_range in KF_DATA:
+            a, b = KF_DATA[mass_range]['2R_eff']['center']
+            a_std, b_std = KF_DATA[mass_range]['2R_eff']['std']
+            ellipse = Ellipse(xy=(a, b), width=2 * a_std, height=2 * b_std,
+                              facecolor='none', edgecolor=ell_colors[mass_range],
+                              linestyle='--', linewidth=2.5)
+            ax.add_patch(ellipse)
+
+            # Add dummy label for KF_DATA ellipse
+            ax.plot(-1, -1, c=ell_colors[mass_range], linestyle='--', linewidth=2.5,
+                    label=f'{mass_range}')
     # Set limits and labels
-    ax.set_xlim(0, 1.02)
-    ax.set_ylim(0, 1.02)
-    ax.set_xlabel('B/A (Intermediate/Major)', fontsize=14)
-    ax.set_ylabel('C/A (Minor/Major)', fontsize=14)
+    ax.set_xlim(0, 1.0)
+    ax.set_ylim(0, 1.0)
+    ax.set_xlabel(r'$Q = B/A$ $(2R_{eff})$', fontsize=28)
+    ax.set_ylabel(r'$S = C/A$ $(2R_{eff})$', fontsize=28)
+    ax.tick_params(which='both', labelsize=18)
 
-    # Add grid
-    ax.grid(True, alpha=0.3)
+    #make sure plot is square
+    ax.set_aspect('equal', adjustable='box')
 
     # Add title if provided
-    if title:
-        if focus_on_max_prob:
-            ax.set_title(f"{title} - Maximum Likelihood Solution", fontsize=16)
-        else:
-            ax.set_title(title, fontsize=16)
+    # if title:
+    #     if focus_on_max_prob:
+    #         ax.set_title(f"{title} - Maximum Likelihood Solution", fontsize=16)
+    #     else:
+    #         ax.set_title(title, fontsize=16)
 
     # Add legend (adjust position as needed)
-    ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1), ncol=1, fontsize=12)
+    ax.legend(loc='upper left', ncol=1, fontsize=20)
 
     plt.tight_layout()
 
@@ -241,7 +277,7 @@ def plot_projected_distributions(q_obs_list, labels=None, colors=None, bin_width
     Returns:
         figure: Histogram plot figure
     """
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(8, 6))
 
     # Set default colors if not provided
     if colors is None:
@@ -266,14 +302,14 @@ def plot_projected_distributions(q_obs_list, labels=None, colors=None, bin_width
             ax.plot(x_grid, y_kde, color=color, linestyle='-', linewidth=2)
 
     # Set labels and title
-    ax.set_xlabel('Projected Axis Ratio (q = b/a)', fontsize=14)
-    ax.set_ylabel('Density', fontsize=14)
+    ax.set_xlabel('Projected Axis Ratio (q = b/a)', fontsize=28)
+    ax.set_ylabel('Density', fontsize=28)
 
-    if title:
-        ax.set_title(title, fontsize=16)
+    # if title:
+    #     ax.set_title(title, fontsize=16)
 
     # Add legend
-    ax.legend(fontsize=12)
+    ax.legend(fontsize=20)
 
     # Add grid
     ax.grid(True, alpha=0.3)
@@ -286,6 +322,120 @@ def plot_projected_distributions(q_obs_list, labels=None, colors=None, bin_width
 
     return fig
 
+
+
+def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, true_params_list=None,
+                                            labels=None, colors=None, bin_width=0.04,
+                                            output_file=None, title=None, kde=False,
+                                            model_samples=10000):
+    """
+    Plot histograms of projected axis ratios for multiple distributions with model and true distribution overlays.
+
+    Parameters:
+        q_obs_list (list): List of observed projected axis ratio arrays
+        model_params_list (list): List of model parameters [mu_B, mu_C, sigma_B, sigma_C] for each distribution
+        true_params_list (list): List of true/intrinsic parameters [B, C] for each distribution
+        labels (list): List of labels for each distribution
+        colors (list): List of colors for each distribution
+        bin_width (float): Width of histogram bins
+        output_file (str): Path to save the plot (optional)
+        title (str): Title for the plot
+        kde (bool): Whether to plot kernel density estimate
+        model_samples (int): Number of samples to generate for model and true distributions
+
+    Returns:
+        figure: Histogram plot figure
+    """
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Set default colors if not provided
+    if colors is None:
+        colors = plt.cm.tab10.colors[:len(q_obs_list)]
+
+    # Set default labels if not provided
+    if labels is None:
+        labels = [f"Distribution {i + 1}" for i in range(len(q_obs_list))]
+
+    # Calculate bin edges
+    bins = np.arange(0, 1.01, bin_width)
+    true_color = 'red'
+    # Plot histogram for each distribution
+    for i, (q_obs, label, color) in enumerate(zip(q_obs_list, labels, colors)):
+        if color == 'red':
+            color = 'purple'
+
+        # Plot observed data
+        ax.hist(q_obs, bins=bins, alpha=1, color=color, label=f"{label} (Observed)",
+                density=True, histtype='step', linewidth=2.5)
+
+        # Add kernel density estimate for observed data
+        if kde and len(q_obs) > 100:
+            x_grid = np.linspace(0, 1, 500)
+            kde_obj = gaussian_kde(q_obs)
+            y_kde = kde_obj(x_grid)
+            ax.plot(x_grid, y_kde, color=color, linestyle='--', linewidth=2, alpha=1)
+
+        # Plot model if parameters are provided
+        if model_params_list is not None and i < len(model_params_list):
+            if model_params_list[i] is not None:
+                # Generate model projections
+                q_model = generate_model_projections(model_params_list[i], model_samples)
+
+                # Plot model histogram
+                ax.hist(q_model, bins=bins, alpha=1, color='k',
+                        label=f"{label} (Model)", density=True, histtype='step',
+                        linewidth=2.5, linestyle='-')
+
+                # Add KDE for model if requested
+                if kde and len(q_model) > 100:
+                    kde_model = gaussian_kde(q_model)
+                    y_kde_model = kde_model(x_grid)
+                    ax.plot(x_grid, y_kde_model, color='k', linestyle='--',
+                            linewidth=2, alpha=1)
+        if true_params_list is not None and i < len(true_params_list):
+            if true_params_list[i] is not None:
+                # Generate true projections from intrinsic shape
+                B_true, C_true, B_err, C_err = true_params_list[i]
+                q_true = generate_model_projections([B_true, C_true,B_err,C_err], model_samples)
+
+                # Plot true distribution histogram
+                #make sure color doesn't clash with parameter color
+
+                ax.hist(q_true, bins=bins, alpha=1, color=true_color,
+                        label=f"{label} (True)", density=True, histtype='step',
+                        linewidth=2.5, linestyle='-')
+
+                # Add KDE for true distribution if requested
+                if kde and len(q_true) > 100:
+                    kde_true = gaussian_kde(q_true)
+                    y_kde_true = kde_true(x_grid)
+                    ax.plot(x_grid, y_kde_true, color=true_color, linestyle=':',
+                            linewidth=2, alpha=1)
+
+    # Set labels and title
+    ax.set_xlabel(r'Projected Axis Ratio ($q = b/a$)', fontsize=30)
+    ax.set_ylabel('Density', fontsize=30)
+
+    #make axis ticks larger
+    ax.tick_params(axis='both', which='major', labelsize=20)
+
+    # if title:
+    #     ax.set_title(title, fontsize=16)
+
+    # Add legend
+    ax.legend(fontsize=20)
+
+    # Add grid
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    # Save if output_file is provided
+    if output_file:
+        plt.savefig(output_file, dpi=300, bbox_inches="tight")
+
+    return fig
 
 def plot_chain_evolution(sampler, burn_in=None, output_file=None, title=None):
     """

@@ -1,3 +1,5 @@
+#this contains a bunch of helperfunction for MCMC_sims to run and plot MCMC codes from shape_inference and shape_plotting. 
+
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,6 +13,7 @@ from shape_inference import (
     generate_projections,
     generate_ellipsoid_distribution,
     generate_projections_from_distribution,
+    generate_model_projections,
     infer_intrinsic_shape,
     load_results
 )
@@ -19,6 +22,7 @@ from shape_plotting import (
     plot_corner,
     plot_ellipsoid_shapes,
     plot_projected_distributions,
+    plot_projected_distributions_with_model,
     plot_chain_evolution,
     plot_comparison_grid,
     plot_statistics
@@ -72,14 +76,7 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
             continue
 
         x_angle, y_angle = parse_orientation(orientation)
-        if x_angle is None:
-            continue
-
-        # Store original point
-        if coordinate_system == 'vectors':
-            point = angles_to_vector(x_angle, y_angle)
-        else:  # 'angles' is default
-            point = [x_angle, y_angle]
+        point = [x_angle, y_angle]
 
         original_points.append(point)
 
@@ -146,6 +143,7 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
 
     # filter out nan data points:
     # Filter out NaN values before creating interpolators
+    extended_points_filtered = []
     for i in range(len(reff_multipliers)):
         if len(extended_values[i]) == 0:
             continue
@@ -162,7 +160,8 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
         values_array = values_array[valid_mask]
 
         # Store the filtered arrays back for interpolation
-        extended_points_filtered = points_array
+        # extended_points_filtered = points_array
+        extended_points_filtered.append(points_array)
         extended_values[i] = values_array
 
     # Create interpolators based on selected method using filtered dataset
@@ -173,8 +172,12 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
         if len(extended_values[i]) == 0:
             continue
 
-        points_array = np.array(extended_points_filtered)
+        points_array = np.array(extended_points_filtered[i])
         values_array = np.array(extended_values[i])
+        #assert lengths are the same
+        assert len(points_array) == len(values_array), f'length of points, is not the same as values for interpolation: {len(points_array)} != {len(values_array)}'
+        #need to fix this, each reff index needs its own points array, Should be fixed? need to check. 
+
 
         if interpolation_method == 'rbf':
             if coordinate_system == 'vectors':
@@ -452,7 +455,8 @@ class GalaxyEllipseCollection:
         q_values = []
 
 
-
+        i = 0
+        j = 0
         for halo_key in self.halos.keys():
             interpolator = self.interpolators[halo_key]
 
@@ -460,12 +464,20 @@ class GalaxyEllipseCollection:
             x_angles, y_angles = random_viewing_angles(angles_per_halo)
 
             # Get q values for each angle
-            e = np.array([interpolator(x, y, reff_index) for x, y in zip(x_angles, y_angles)])
-            q = 1 - e
-            q_values.extend(q)
+            try:
+                e = np.array([interpolator(x, y, reff_index) for x, y in zip(x_angles, y_angles)])
+                q = 1 - e
+                q_values.extend(q)
+                i = i + 1
+            except Exception as ex:
+                print(f"Error generating q values for halo {halo_key}: {ex}")
+                j= j + 1
+                #count number of successful and failed halos
+
+        print(f'Generated q values from {i} halos, failed for {j} halos.')
 
 
-
+        
         return np.array(q_values)
 
     def run_inference_single_halo(self, sim_name, halo_id, n_angles, reff_index=0,
@@ -495,7 +507,7 @@ class GalaxyEllipseCollection:
             output_prefix = f"{sim_name}_{halo_id}"
 
         # Create full output directory path
-        full_output_dir = Path(output_dir) / f"{sim_name}_{halo_id}"
+        full_output_dir = Path(output_dir)
         os.makedirs(full_output_dir, exist_ok=True)
 
         # Check for existing results
@@ -582,7 +594,8 @@ class GalaxyEllipseCollection:
     def run_inference_all_halos(self, n_angles_per_halo, reff_index=0, weighted=False,
                                 n_walkers=32, n_steps=3000, burn_in=500, n_cores=None,
                                 output_prefix="all_halos", output_dir="results",
-                                force_rerun=False):
+                                force_rerun=False,
+                                label="All Halos Combined", color="blue"):
         """
         Run shape inference on a distribution from all halos.
 
@@ -675,6 +688,7 @@ class GalaxyEllipseCollection:
         ca_s = np.mean(ca_s)
 
         true_params = np.array([ba_s, ca_s, ba_s_sigma, ca_s_sigma])
+
         # Plot results
         self.plot_results(
             samples=samples,
@@ -683,8 +697,8 @@ class GalaxyEllipseCollection:
             q_obs=q_obs,
             chain=chain,
             burn_in=burn_in,
-            label="All Halos Combined",
-            color="red",
+            label=label,
+            color=color,
             output_prefix=output_prefix,
             output_dir=str(full_output_dir)
         )
@@ -695,7 +709,7 @@ class GalaxyEllipseCollection:
                      chain=None, burn_in=500, label="Model", color="blue",
                      output_prefix=None, output_dir="results"):
         """
-        Plot inference results.
+        Plot inference results with model comparison.
 
         Parameters:
             samples (array): MCMC samples
@@ -712,18 +726,26 @@ class GalaxyEllipseCollection:
         if output_prefix is None:
             output_prefix = label.lower().replace(" ", "_")
 
-        print(true_params)
-        print(max_prob_params)
+        print("True params:", true_params)
+        print("Max prob params:", max_prob_params)
 
         os.makedirs(output_dir, exist_ok=True)
 
-        # Plot histogram of projections
-        fig_hist = plot_projected_distributions(
+        # Plot histogram of projections WITH model overlay
+        fig_hist = plot_projected_distributions_with_model(
+            [q_obs], [max_prob_params], [true_params],[label], [color],
+            output_file=os.path.join(output_dir, f"{output_prefix}_projections_comparison.png"),
+            title=f"Projected Axis Ratios: Observed vs Model for {label}"
+        )
+        plt.close(fig_hist)
+
+        # Also create the original histogram (observed only) for comparison
+        fig_hist_obs = plot_projected_distributions(
             [q_obs], [label], [color],
             output_file=os.path.join(output_dir, f"{output_prefix}_projections_hist.png"),
             title=f"Projected Axis Ratios for {label}"
         )
-        plt.close(fig_hist)
+        plt.close(fig_hist_obs)
 
         # Plot corner plot
         fig_corner = plot_corner(
@@ -744,8 +766,8 @@ class GalaxyEllipseCollection:
 
         # Create ellipsoid shapes plot
         fig_shapes = plot_ellipsoid_shapes(
-            [samples], [max_prob_params], [true_params],  # Use max_prob as "true" params
-            [label], ["blue"],
+            [samples], [max_prob_params], [true_params],
+            [label], color,
             output_file=os.path.join(output_dir, f"{output_prefix}_ellipsoid_shapes.png"),
             title=f"Intrinsic Shapes: {label}",
             focus_on_max_prob=True
@@ -761,6 +783,27 @@ class GalaxyEllipseCollection:
             focus_on_max_prob=False, show_samples=True, show_ellipses=False
         )
         plt.close(fig_shapes_all)
+
+        # Generate some diagnostic information about the fit
+        print(f"\n=== Model Fit Diagnostics for {label} ===")
+        if max_prob_params is not None:
+            mu_B, mu_C, sigma_B, sigma_C = max_prob_params
+            print(f"Best-fit parameters:")
+            print(f"  μB = {mu_B:.3f} ± {sigma_B:.3f}")
+            print(f"  μC = {mu_C:.3f} ± {sigma_C:.3f}")
+
+            # Generate model sample for comparison
+            q_model = generate_model_projections(max_prob_params, len(q_obs))
+
+            # Basic statistics comparison
+            print(f"\nDistribution comparison:")
+            print(f"  Observed: mean={np.mean(q_obs):.3f}, std={np.std(q_obs):.3f}")
+            print(f"  Model:    mean={np.mean(q_model):.3f}, std={np.std(q_model):.3f}")
+
+            # KS test for goodness of fit
+            from scipy.stats import ks_2samp
+            ks_stat, ks_pvalue = ks_2samp(q_obs, q_model)
+            print(f"  KS test: D={ks_stat:.3f}, p-value={ks_pvalue:.3f}")
 
     def get_all_halo_keys(self):
         """Return a list of all (sim_name, halo_id) keys in the collection."""
