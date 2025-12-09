@@ -15,12 +15,12 @@ import numpy as np
 
 
 # Set environment variables
-os.environ['TANGOS_DB_CONNECTION'] = '/home/bk639/data_base/CDM_all.db'
-os.environ['TANGOS_SIMULATION_FOLDER'] = '/home/bk639/data/CDM_z0'
+os.environ['TANGOS_DB_CONNECTION'] = '/home/bk639/data/test_dbs/FIRE_test.db'
+#os.environ['TANGOS_SIMULATION_FOLDER'] = '/home/bk639/data/CDM_z0'
 os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
 #add python path /home/bk639/MorphologyMeasurements/Code/tangos
 import sys
-sys.path.append('/home/bk639/mytangosproperty')
+sys.path.append('/home/bk639/FIRE_analsis_tools/')
 import tangos
 sims = tangos.all_simulations()
 import mytangosproperty
@@ -413,6 +413,8 @@ def plot_isophotes(images, isophote_params, orientations, reffs, rhalf, filename
         axs[i].set_title(f'{orientations[i]}', color='white', y=0.85)
     # reduce white space
     plt.subplots_adjust(wspace=0, hspace=0)
+    #make sure directory exists
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     plt.savefig(filename, bbox_inches='tight', pad_inches=.1, dpi=150)
     plt.close(fig)
     return ellipse_dict
@@ -450,7 +452,7 @@ for sim in sims:
         halos = halos[1:]
 
     for _, halo in enumerate(halos):
-        try:
+        # try:
             halo_name = halo.basename
             halo_ref = f'{sim_name}/%/{halo_name}'
             hid = halo_name.split('_')[1]
@@ -461,10 +463,10 @@ for sim in sims:
                 continue
                 
             #print(halo['n_star'][0])
-            if halo['n_star'][0] < 4000:
+            if halo.calculate('NStar()') < 4000:
                 continue
             
-            print(f'Processing halo {hid} with {halo["n_star"][0]} stars')
+            print(f'Processing halo {hid} with {halo.calculate('NStar()')} stars')
             #get images and isophote
 
             halo_images = halo[f'halo_images_{band}']
@@ -477,6 +479,7 @@ for sim in sims:
             reffs = np.array(image_reffs)
             #print(np.min(reffs),np.max(reffs),np.mean(reffs),np.std(reffs))
             filename = ('figures/' + str(sim.basename) +'.'+ str(hid)+ '.isophotes.png')
+
             halo_dict = plot_isophotes(halo_images, isophote_params, image_orientations, reffs, Rhalf, filename)
             #save to folder figures
 
@@ -496,9 +499,9 @@ for sim in sims:
             
             #print(halo['isophote_parameters'])
 
-        except KeyError:
-            #continue
-            print('No isophote parameters')
+        # except KeyError:
+        #     #continue
+        #     print('No isophote parameters')
 
 
 #print all sims and hids

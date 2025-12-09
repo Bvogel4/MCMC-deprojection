@@ -84,6 +84,13 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
         for i, eps in enumerate(ellipticities):
             if i < len(reff_multipliers):
                 original_values[i].append(float(eps))
+                
+    print(f"Original points count: {len(original_points)}")
+
+    for i in range(len(reff_multipliers)):
+        vals = original_values[i]
+        nan_count = sum(1 for v in vals if np.isnan(v))
+        print(f"reff_index {i} (mult={reff_multipliers[i]}): {len(vals)} values, {nan_count} NaNs")
 
     # Now create extended dataset with periodic boundaries
     extended_points = original_points.copy()
@@ -143,36 +150,45 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
 
     # filter out nan data points:
     # Filter out NaN values before creating interpolators
-    extended_points_filtered = []
+
+    extended_points_filtered = {}  # ← Change to dict
     for i in range(len(reff_multipliers)):
         if len(extended_values[i]) == 0:
             continue
 
-        # Convert to numpy arrays for efficient filtering
         points_array = np.array(extended_points)
         values_array = np.array(extended_values[i])
 
-        # Create boolean mask for non-NaN values
         valid_mask = ~np.isnan(values_array)
 
-        # Apply mask to filter out NaN values
         points_array = points_array[valid_mask]
         values_array = values_array[valid_mask]
 
-        # Store the filtered arrays back for interpolation
-        # extended_points_filtered = points_array
-        extended_points_filtered.append(points_array)
-        extended_values[i] = values_array
+        # Only store if there's valid data after filtering
+        if len(values_array) > 0:
+            extended_points_filtered[i] = points_array  # ← Use dict with index as key
+            extended_values[i] = values_array
+        else:
+            extended_values[i] = []  # Mark as empty
+    for i in range(len(reff_multipliers)):
+        print(f"After filtering reff_index {i}: {len(extended_values[i])} valid values")
+    # Create interpolators
+    for i in range(len(reff_multipliers)):
+        if i not in extended_points_filtered or len(extended_values[i]) == 0:
+            continue
+
+        points_array = extended_points_filtered[i]
+        values_array = np.array(extended_values[i])
 
     # Create interpolators based on selected method using filtered dataset
     interpolators = {}
     fallback_interpolators = {}
 
     for i in range(len(reff_multipliers)):
-        if len(extended_values[i]) == 0:
+        if i not in extended_points_filtered or len(extended_values[i]) == 0:
             continue
 
-        points_array = np.array(extended_points_filtered[i])
+        points_array = extended_points_filtered[i]  # ← Now correctly keyed
         values_array = np.array(extended_values[i])
         #assert lengths are the same
         assert len(points_array) == len(values_array), f'length of points, is not the same as values for interpolation: {len(points_array)} != {len(values_array)}'
@@ -208,6 +224,8 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
             y_angle = y_angle % 360
 
         if reff_index not in interpolators:
+            #show what reff_index was requested and what multipliers are available
+            print(f"Available reff_multipliers: {reff_multipliers}")
             raise ValueError(f"No data for reff_index {reff_index} (multiplier={reff_multipliers[reff_index]})")
 
         # Interpolate based on selected method and coordinate system
@@ -362,6 +380,119 @@ def check_existing_results(output_dir, prefix):
     return None
 
 
+def assess_parameter_recovery(max_prob_params, true_params,
+                              param_names=['μ_B', 'μ_C', 'σ_B', 'σ_C'],
+                              param_errors=None):
+    """
+    Assess how well the maximum probability MCMC estimates recover true parameter values.
+
+    Parameters:
+        max_prob_params: Array of maximum probability parameter estimates [mu_B, mu_C, sigma_B, sigma_C]
+        true_params: Array of true parameter values [B_true, C_true, B_err_true, C_err_true]
+        param_names: Names of parameters for display
+        param_errors: Optional array of parameter uncertainties (e.g., from posterior std)
+
+    Returns:
+        dict: Recovery statistics including 'output_text' for saving to file
+    """
+    import numpy as np
+
+    results = {
+        'param_names': param_names,
+        'true_values': true_params,
+        'estimated_values': max_prob_params,
+        'bias': [],
+        'fractional_bias': [],
+        'absolute_error': [],
+    }
+
+    if param_errors is not None:
+        results['param_errors'] = param_errors
+        results['sigma_from_true'] = []
+        results['within_1sigma'] = []
+        results['within_2sigma'] = []
+
+    # Build output string
+    lines = []
+
+    lines.append("")
+    lines.append("=" * 80)
+    lines.append("PARAMETER RECOVERY ASSESSMENT (Maximum Probability Estimates)")
+    lines.append("=" * 80)
+
+    if param_errors is not None:
+        lines.append(f"{'Parameter':<10} {'True':<10} {'Estimated':<12} {'Error':<10} {'Bias':<12} {'σ away':<10}")
+        lines.append("-" * 80)
+    else:
+        lines.append(f"{'Parameter':<10} {'True':<10} {'Estimated':<12} {'Bias':<15} {'Frac Bias':<12}")
+        lines.append("-" * 80)
+
+    for i, (name, true_val, est_val) in enumerate(zip(param_names, true_params, max_prob_params)):
+        bias = est_val - true_val
+        frac_bias = (bias / true_val * 100) if true_val != 0 else np.nan
+        abs_error = abs(bias)
+
+        results['bias'].append(bias)
+        results['fractional_bias'].append(frac_bias)
+        results['absolute_error'].append(abs_error)
+
+        if param_errors is not None:
+            sigma_away = abs(bias) / param_errors[i] if param_errors[i] > 0 else np.nan
+            results['sigma_from_true'].append(sigma_away)
+            results['within_1sigma'].append(sigma_away <= 1)
+            results['within_2sigma'].append(sigma_away <= 2)
+
+            lines.append(
+                f"{name:<10} {true_val:<10.4f} {est_val:<12.4f} {param_errors[i]:<10.4f} {bias:+.4f}      {sigma_away:<10.2f}")
+        else:
+            lines.append(f"{name:<10} {true_val:<10.4f} {est_val:<12.4f} {bias:+.4f}         {frac_bias:+.1f}%")
+
+    lines.append("-" * 80)
+
+    # Summary statistics
+    avg_abs_error = np.mean(results['absolute_error'])
+    avg_frac_bias = np.nanmean(np.abs(results['fractional_bias']))
+
+    lines.append("")
+    lines.append("Summary:")
+    lines.append(f"  Mean absolute error: {avg_abs_error:.4f}")
+    lines.append(f"  Mean |fractional bias|: {avg_frac_bias:.1f}%")
+
+    if param_errors is not None:
+        avg_sigma_away = np.nanmean(results['sigma_from_true'])
+        n_within_1sigma = sum(results['within_1sigma'])
+        n_within_2sigma = sum(results['within_2sigma'])
+        lines.append(f"  Average σ from true: {avg_sigma_away:.2f}")
+        lines.append(f"  Within 1σ: {n_within_1sigma}/{len(param_names)}")
+        lines.append(f"  Within 2σ: {n_within_2sigma}/{len(param_names)}")
+
+    # Interpretation
+    lines.append("")
+    lines.append("Interpretation:")
+    if avg_frac_bias < 5:
+        lines.append("  ✓ Excellent recovery: < 5% average bias")
+    elif avg_frac_bias < 10:
+        lines.append("  ✓ Good recovery: < 10% average bias")
+    elif avg_frac_bias < 20:
+        lines.append("  ~ Moderate recovery: 10-20% average bias")
+    else:
+        lines.append("  ✗ Poor recovery: > 20% average bias")
+
+    # Convert lists to arrays for easier use
+    results['bias'] = np.array(results['bias'])
+    results['fractional_bias'] = np.array(results['fractional_bias'])
+    results['absolute_error'] = np.array(results['absolute_error'])
+    results['avg_fractional_bias'] = avg_frac_bias
+    results['avg_absolute_error'] = avg_abs_error
+
+    # Store the full output text
+    output_text = '\n'.join(lines)
+    results['output_text'] = output_text
+
+    # Print to terminal
+    print(output_text)
+
+    return results
 
 
 class GalaxyEllipseCollection:
@@ -688,6 +819,13 @@ class GalaxyEllipseCollection:
         ca_s = np.mean(ca_s)
 
         true_params = np.array([ba_s, ca_s, ba_s_sigma, ca_s_sigma])
+
+        recovery_results = assess_parameter_recovery(max_prob_params, true_params)
+
+        # Save recovery results to text file
+        with open(full_output_dir / f"{output_prefix}_recovery.txt", 'w') as f:
+            f.write(recovery_results['output_text'])
+        
 
         # Plot results
         self.plot_results(

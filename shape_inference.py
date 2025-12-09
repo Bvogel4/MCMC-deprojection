@@ -181,35 +181,11 @@ def log_likelihood(params, q_obs):
 
     # Enforce physical constraints
     # mu_B and mu_C must be in [0, 1]
-    if not (0 < mu_B <= 1 and 0 < mu_C <= 1):
-        return -np.inf
-    # mu_B must be greater than mu_C
-    if mu_B <= mu_C:
+    if not (0 < mu_C < mu_B <= 1):
         return -np.inf
     # sigma_B and sigma_C must be between 0 and 0.5
     if not (0 < sigma_B < 0.5 and 0 < sigma_C < 0.5):
         return -np.inf
-    #prevent uncertainty from exceeding physical limits
-    # B = C limits
-    # we'll let these region extend to 1.5 sigma
-    if mu_B - 1.5*sigma_B < mu_C + 1.5*sigma_C:
-        return -np.inf
-    # B = 0 limits
-    if mu_B - 1.5*sigma_B < 0:
-        return -np.inf
-    # B = 1 limits
-    if mu_B + 1.5*sigma_B > 1:
-        return -np.inf
-    # C = 0 limits
-    if mu_C - 1.5*sigma_C < 0:
-        return -np.inf
-    # C = 1 limits
-    if mu_C + 1.5*sigma_C > 1:
-        return -np.inf
-
-    
-    
-
     # Generate model projections
     n_model_draws = len(q_obs) * 10  # number of draws to approximate the model distribution
 

@@ -11,13 +11,13 @@ from galaxy_ellipse_collection import GalaxyEllipseCollection
 
 # load tangos data
 # Set environment variables
-os.environ['TANGOS_DB_CONNECTION'] = '/home/bk639/data_base/CDM_all.db'
-os.environ['TANGOS_SIMULATION_FOLDER'] = '/home/bk639/data/CDM_z0'
+# Set environment variables
+os.environ['TANGOS_DB_CONNECTION'] = '/home/bk639/data/test_dbs/FIRE_test.db'
+#os.environ['TANGOS_SIMULATION_FOLDER'] = '/home/bk639/data/CDM_z0'
 os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
-# add python path /home/bk639/MorphologyMeasurements/Code/tangos
+#add python path /home/bk639/MorphologyMeasurements/Code/tangos
 import sys
-
-sys.path.append('/home/bk639/mytangosproperty')
+sys.path.append('/home/bk639/FIRE_analsis_tools/')
 import tangos
 
 tangos_sims = tangos.all_simulations()
@@ -39,7 +39,7 @@ N_ANGLES_PER_HALO = 2000  # Number of angles to sample for each halo
 N_ANGLES_PER_HALO_ALL = 5000 # Number of angles to sample for each halo when running all combined
 
 # Set force_rerun to False to use existing results if available
-force_rerun = False
+force_rerun = True
 
 
 # Disky/Non-disky classification thresholds
@@ -190,6 +190,7 @@ def create_summary_table(results_dict, output_file="results/summary/summary_tabl
     return summary_df
 
 
+
 # ======================================
 # Main execution
 # ======================================
@@ -295,8 +296,9 @@ if __name__ == "__main__":
     # ======================================
     # Step 2: Run inference on all halos (original analysis)
     # ======================================
-    print('\n' + '=' * 50)
-    print('Running inference on ALL halos individually...')
+
+    # print('\n' + '=' * 50)
+    # print('Running inference on ALL halos individually...')
     # individual_results = run_all_individual_halos(
     #     galaxy_collection,
     #     n_angles=N_ANGLES_PER_HALO,
@@ -309,7 +311,7 @@ if __name__ == "__main__":
     #     individual_results,
     #     output_file=f"results/summary/individual_summary_{radius}_{band}_{image_type}reff_all.csv"
     # )
-
+    # 
     print('\nRunning inference on ALL halos combined...')
     all_samples, all_max_params, all_sampler, all_q_obs = galaxy_collection.run_inference_all_halos(
         n_steps=N_STEPS,
