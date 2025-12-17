@@ -382,7 +382,8 @@ def check_existing_results(output_dir, prefix):
 
 def assess_parameter_recovery(max_prob_params, true_params,
                               param_names=['μ_B', 'μ_C', 'σ_B', 'σ_C'],
-                              param_errors=None):
+                              param_errors=None,
+                              q_obs=None, q_model=None, q_true=None):
     """
     Assess how well the maximum probability MCMC estimates recover true parameter values.
 
@@ -391,11 +392,15 @@ def assess_parameter_recovery(max_prob_params, true_params,
         true_params: Array of true parameter values [B_true, C_true, B_err_true, C_err_true]
         param_names: Names of parameters for display
         param_errors: Optional array of parameter uncertainties (e.g., from posterior std)
+        q_obs: Optional array of observed distribution values
+        q_model: Optional array of model distribution values (from estimated parameters)
+        q_true: Optional array of true distribution values (from true parameters)
 
     Returns:
         dict: Recovery statistics including 'output_text' for saving to file
     """
     import numpy as np
+    from scipy import stats
 
     results = {
         'param_names': param_names,
@@ -478,6 +483,112 @@ def assess_parameter_recovery(max_prob_params, true_params,
     else:
         lines.append("  ✗ Poor recovery: > 20% average bias")
 
+    # ========================================================================
+    # DISTRIBUTION COMPARISON TESTS
+    # ========================================================================
+    if q_obs is not None and q_model is not None:
+        lines.append("")
+        lines.append("=" * 80)
+        lines.append("DISTRIBUTION COMPARISON TESTS")
+        lines.append("=" * 80)
+
+        results['distribution_tests'] = {}
+
+        # Test 1: Observed vs Model
+        lines.append("")
+        lines.append("1. Observed vs Model Distribution")
+        lines.append("-" * 80)
+
+        ks_stat_om, ks_pval_om = stats.ks_2samp(q_obs, q_model)
+        emd_om = stats.wasserstein_distance(q_obs, q_model)
+
+        results['distribution_tests']['obs_vs_model'] = {
+            'ks_statistic': ks_stat_om,
+            'ks_pvalue': ks_pval_om,
+            'earth_movers_distance': emd_om
+        }
+
+        lines.append(f"  Kolmogorov-Smirnov Test:")
+        lines.append(f"    Statistic: {ks_stat_om:.6f}")
+        lines.append(f"    p-value:   {ks_pval_om:.6f}")
+        if ks_pval_om > 0.05:
+            lines.append(f"    → Cannot reject null (p > 0.05): distributions are similar")
+        else:
+            lines.append(f"    → Reject null (p ≤ 0.05): distributions are different")
+
+        lines.append(f"  Earth Mover's Distance: {emd_om:.6f}")
+
+        # Test 2: Observed vs True (if q_true provided)
+        if q_true is not None:
+            lines.append("")
+            lines.append("2. Observed vs True Distribution")
+            lines.append("-" * 80)
+
+            ks_stat_ot, ks_pval_ot = stats.ks_2samp(q_obs, q_true)
+            emd_ot = stats.wasserstein_distance(q_obs, q_true)
+
+            results['distribution_tests']['obs_vs_true'] = {
+                'ks_statistic': ks_stat_ot,
+                'ks_pvalue': ks_pval_ot,
+                'earth_movers_distance': emd_ot
+            }
+
+            lines.append(f"  Kolmogorov-Smirnov Test:")
+            lines.append(f"    Statistic: {ks_stat_ot:.6f}")
+            lines.append(f"    p-value:   {ks_pval_ot:.6f}")
+            if ks_pval_ot > 0.05:
+                lines.append(f"    → Cannot reject null (p > 0.05): distributions are similar")
+            else:
+                lines.append(f"    → Reject null (p ≤ 0.05): distributions are different")
+
+            lines.append(f"  Earth Mover's Distance: {emd_ot:.6f}")
+
+            # Test 3: Model vs True
+            lines.append("")
+            lines.append("3. Model vs True Distribution")
+            lines.append("-" * 80)
+
+            ks_stat_mt, ks_pval_mt = stats.ks_2samp(q_model, q_true)
+            emd_mt = stats.wasserstein_distance(q_model, q_true)
+
+            results['distribution_tests']['model_vs_true'] = {
+                'ks_statistic': ks_stat_mt,
+                'ks_pvalue': ks_pval_mt,
+                'earth_movers_distance': emd_mt
+            }
+
+            lines.append(f"  Kolmogorov-Smirnov Test:")
+            lines.append(f"    Statistic: {ks_stat_mt:.6f}")
+            lines.append(f"    p-value:   {ks_pval_mt:.6f}")
+            if ks_pval_mt > 0.05:
+                lines.append(f"    → Cannot reject null (p > 0.05): distributions are similar")
+            else:
+                lines.append(f"    → Reject null (p ≤ 0.05): distributions are different")
+
+            lines.append(f"  Earth Mover's Distance: {emd_mt:.6f}")
+
+            # Comparative summary
+            lines.append("")
+            lines.append("Summary of Distribution Comparisons:")
+            lines.append("-" * 80)
+            lines.append(f"  {'Comparison':<25} {'KS Stat':<12} {'KS p-value':<12} {'EMD':<12}")
+            lines.append(f"  {'-' * 25} {'-' * 12} {'-' * 12} {'-' * 12}")
+            lines.append(f"  {'Observed vs Model':<25} {ks_stat_om:<12.6f} {ks_pval_om:<12.6f} {emd_om:<12.6f}")
+            lines.append(f"  {'Observed vs True':<25} {ks_stat_ot:<12.6f} {ks_pval_ot:<12.6f} {emd_ot:<12.6f}")
+            lines.append(f"  {'Model vs True':<25} {ks_stat_mt:<12.6f} {ks_pval_mt:<12.6f} {emd_mt:<12.6f}")
+
+            lines.append("")
+            lines.append("Interpretation:")
+            if emd_mt < emd_ot:
+                lines.append(f"  ✓ Model is closer to truth than observations (EMD: {emd_mt:.6f} < {emd_ot:.6f})")
+            else:
+                lines.append(f"  → Model is farther from truth than observations (EMD: {emd_mt:.6f} ≥ {emd_ot:.6f})")
+
+            if ks_pval_om > 0.05:
+                lines.append(f"  ✓ Model adequately represents observed data (KS p = {ks_pval_om:.4f})")
+            else:
+                lines.append(f"  ✗ Model differs significantly from observed data (KS p = {ks_pval_om:.4f})")
+
     # Convert lists to arrays for easier use
     results['bias'] = np.array(results['bias'])
     results['fractional_bias'] = np.array(results['fractional_bias'])
@@ -493,6 +604,7 @@ def assess_parameter_recovery(max_prob_params, true_params,
     print(output_text)
 
     return results
+
 
 
 class GalaxyEllipseCollection:
@@ -819,8 +931,15 @@ class GalaxyEllipseCollection:
         ca_s = np.mean(ca_s)
 
         true_params = np.array([ba_s, ca_s, ba_s_sigma, ca_s_sigma])
+        model_samples = 10000
 
-        recovery_results = assess_parameter_recovery(max_prob_params, true_params)
+        q_true,_,_ = generate_model_projections([ba_s, ca_s, ba_s_sigma, ca_s_sigma], model_samples)
+        q_model,_,_ = generate_model_projections(max_prob_params, model_samples)
+
+
+        print(q_obs,q_true,q_model)
+
+        recovery_results = assess_parameter_recovery(max_prob_params, true_params, q_obs=q_obs, q_model=q_model, q_true=q_true)
 
         # Save recovery results to text file
         with open(full_output_dir / f"{output_prefix}_recovery.txt", 'w') as f:
@@ -833,6 +952,8 @@ class GalaxyEllipseCollection:
             max_prob_params=max_prob_params,
             true_params=true_params,
             q_obs=q_obs,
+            q_model=q_model,
+            q_true=q_true,
             chain=chain,
             burn_in=burn_in,
             label=label,
@@ -843,7 +964,7 @@ class GalaxyEllipseCollection:
 
         return samples, max_prob_params, sampler, q_obs
 
-    def plot_results(self, samples, max_prob_params, q_obs, true_params=None,
+    def plot_results(self, samples, max_prob_params, q_obs,q_model=None,q_true=None, true_params=None,
                      chain=None, burn_in=500, label="Model", color="blue",
                      output_prefix=None, output_dir="results"):
         """
@@ -872,6 +993,7 @@ class GalaxyEllipseCollection:
         # Plot histogram of projections WITH model overlay
         fig_hist = plot_projected_distributions_with_model(
             [q_obs], [max_prob_params], [true_params],[label], [color],
+            q_model=q_model, q_true=q_true,
             output_file=os.path.join(output_dir, f"{output_prefix}_projections_comparison.png"),
             title=f"Projected Axis Ratios: Observed vs Model for {label}"
         )
@@ -922,26 +1044,6 @@ class GalaxyEllipseCollection:
         )
         plt.close(fig_shapes_all)
 
-        # Generate some diagnostic information about the fit
-        print(f"\n=== Model Fit Diagnostics for {label} ===")
-        if max_prob_params is not None:
-            mu_B, mu_C, sigma_B, sigma_C = max_prob_params
-            print(f"Best-fit parameters:")
-            print(f"  μB = {mu_B:.3f} ± {sigma_B:.3f}")
-            print(f"  μC = {mu_C:.3f} ± {sigma_C:.3f}")
-
-            # Generate model sample for comparison
-            q_model = generate_model_projections(max_prob_params, len(q_obs))
-
-            # Basic statistics comparison
-            print(f"\nDistribution comparison:")
-            print(f"  Observed: mean={np.mean(q_obs):.3f}, std={np.std(q_obs):.3f}")
-            print(f"  Model:    mean={np.mean(q_model):.3f}, std={np.std(q_model):.3f}")
-
-            # KS test for goodness of fit
-            from scipy.stats import ks_2samp
-            ks_stat, ks_pvalue = ks_2samp(q_obs, q_model)
-            print(f"  KS test: D={ks_stat:.3f}, p-value={ks_pvalue:.3f}")
 
     def get_all_halo_keys(self):
         """Return a list of all (sim_name, halo_id) keys in the collection."""

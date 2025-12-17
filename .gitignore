@@ -1,7 +1,8 @@
 __pychache__/
-
+results/*
 *.npy
 *.pkl
 *.png
 *.pyc
 .ipynb*
+*pyc

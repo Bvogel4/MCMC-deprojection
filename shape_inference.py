@@ -12,6 +12,7 @@ import time
 from multiprocessing import Pool
 from scipy.special import factorial as scipy_factorial
 import pickle
+from scipy import stats
 #supress warning from emcee
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="emcee")
@@ -95,60 +96,66 @@ def generate_projections(a, b, c, n_samples=10000):
     return q
 
 
-def generate_ellipsoid_distribution(n_ellipsoids, mu_B, sigma_B, mu_C, sigma_C):
+import numpy as np
+from scipy import stats
+from scipy.special import ndtr, ndtri  # Faster than stats.norm.cdf/ppf
+
+
+def generate_ellipsoid_distribution(n_samples, mu_B, sigma_B, mu_C, sigma_C):
+
+    # Sample B from truncated normal with bounds (0, 1)
+    a_B = (0 - mu_B) / sigma_B
+    b_B = (1 - mu_B) / sigma_B
+    B_samples = stats.truncnorm.rvs(a_B, b_B, loc=mu_B, scale=sigma_B, size=n_samples)
+
+    # Vectorized C sampling using inverse CDF method
+    # For truncated normal: X = Φ⁻¹(Φ(a) + U·(Φ(b) - Φ(a))) · σ + μ
+    a_C = (0 - mu_C) / sigma_C  # scalar lower bound (standardized)
+    b_C = (B_samples - mu_C) / sigma_C  # array of upper bounds (standardized)
+
+    # CDF values at bounds (ndtr is ~3-5x faster than stats.norm.cdf)
+    Phi_a = ndtr(a_C)  # scalar
+    Phi_b = ndtr(b_C)  # array
+
+    # Uniform samples for inverse CDF transform
+    u = np.random.random(n_samples)
+
+    # Inverse CDF transform
+    cdf_vals = Phi_a + u * (Phi_b - Phi_a)
+    cdf_vals = np.clip(cdf_vals, 1e-12, 1 - 1e-12)  # Numerical stability
+
+    C_standardized = ndtri(cdf_vals)  # ndtri is faster than stats.norm.ppf
+    C_samples = C_standardized * sigma_C + mu_C
+
+    # Handle edge cases where bounds are invalid (B_val < mu_C effectively)
+    invalid = Phi_b <= Phi_a
+    C_samples[invalid] = B_samples[invalid] * 0.99
+
+    return  B_samples, C_samples
+
+
+def generate_model_projections(params, n_samples=10000):
     """
-    Generate a distribution of ellipsoids with given parameters.
+    Generate model projected axis ratios using truncated normal distributions.
 
-    Parameters:
-        n_ellipsoids (int): Number of ellipsoids to generate
-        mu_B, sigma_B (float): Mean and standard deviation of B/A
-        mu_C, sigma_C (float): Mean and standard deviation of C/A
-
-    Returns:
-        tuple: Arrays of sampled B/A and C/A values
+    Vectorized version using inverse CDF method for conditional sampling.
     """
-    # Sample B/A values from a normal distribution
-    B_A = np.random.normal(mu_B, sigma_B, n_ellipsoids)
+    mu_B, mu_C, sigma_B, sigma_C = params
 
-    # Sample C/A values from a normal distribution
-    C_A = np.random.normal(mu_C, sigma_C, n_ellipsoids)
+    B_samples, C_samples = generate_ellipsoid_distribution(n_samples, mu_B, sigma_B, mu_C, sigma_C)
 
-    # Enforce physical constraints: 0 < C/A <= B/A <= 1
-    mask = (B_A > 0) & (B_A <= 1) & (C_A > 0) & (C_A <= B_A)
-    B_A = B_A[mask]
-    C_A = C_A[mask]
+    # Generate random viewing angles
+    phi, theta = random_viewing_angles(n_samples)
 
-    # If too many samples were filtered out, generate more
-    while len(B_A) < n_ellipsoids:
-        additional = n_ellipsoids - len(B_A)
-        B_additional = np.random.normal(mu_B, sigma_B, additional)
-        C_additional = np.random.normal(mu_C, sigma_C, additional)
+    # Calculate projected axis ratios
+    q_model = projected_axis_ratio(phi, theta, B_samples, C_samples)
 
-        mask = (B_additional > 0) & (B_additional <= 1) & (C_additional > 0) & (C_additional <= B_additional)
-        B_A = np.append(B_A, B_additional[mask])
-        C_A = np.append(C_A, C_additional[mask])
-
-    # Trim to exactly n_ellipsoids
-    B_A = B_A[:n_ellipsoids]
-    C_A = C_A[:n_ellipsoids]
-
-    return B_A, C_A
-
+    return q_model, B_samples, C_samples
 
 def generate_projections_from_distribution(B_A, C_A, n_projections_per_ellipsoid=10):
-    """
-    Generate random projections from a distribution of ellipsoids.
 
-    Parameters:
-        B_A, C_A (array): Arrays of B/A and C/A values for the ellipsoids
-        n_projections_per_ellipsoid (int): Number of random projections per ellipsoid
-
-    Returns:
-        array: Projected axis ratios q = b/a
-    """
     n_ellipsoids = len(B_A)
     q_values = []
-
     for i in range(n_ellipsoids):
         # Generate random viewing angles for this ellipsoid
         phi, theta = random_viewing_angles(n_projections_per_ellipsoid)
@@ -183,62 +190,16 @@ def log_likelihood(params, q_obs):
     # mu_B and mu_C must be in [0, 1]
     if not (0 < mu_C < mu_B <= 1):
         return -np.inf
-    # sigma_B and sigma_C must be between 0 and 0.5
-    if not (0 < sigma_B < 0.5 and 0 < sigma_C < 0.5):
+    # sigma_B and sigma_C must be between 0 and 0.8
+    if not (0 < sigma_B < 0.8 and 0 < sigma_C < 0.8):
         return -np.inf
-    # Generate model projections
+
+    from scipy import stats
+
     n_model_draws = len(q_obs) * 10  # number of draws to approximate the model distribution
 
-    # Vectorized sample generation with efficient filtering
-    # Generate more samples initially to account for filtering
-    oversample_factor = 2  # Start with twice as many samples
-    n_initial_samples = int(n_model_draws * oversample_factor)
+    q_model = generate_model_projections(params, n_samples=n_model_draws)
 
-    # Create arrays to store B and C values
-    B_samples = np.random.normal(mu_B, sigma_B, n_initial_samples)
-    C_samples = np.random.normal(mu_C, sigma_C, n_initial_samples)
-
-    # Enforce physical constraints: 0 < C <= B <= 1
-    mask = (B_samples > 0) & (B_samples <= 1) & (C_samples > 0) & (C_samples <= B_samples)
-
-    B_samples = B_samples[mask]
-    C_samples = C_samples[mask]
-
-    # If we don't have enough samples after filtering, generate more efficiently
-    if len(B_samples) < n_model_draws:
-        samples_needed = n_model_draws - len(B_samples)
-
-        # More efficient approach: use rejection sampling in batches
-        while len(B_samples) < n_model_draws:
-            batch_size = min(samples_needed * 2, n_initial_samples)  # Adaptive batch size
-
-            B_additional = np.random.normal(mu_B, sigma_B, batch_size)
-            C_additional = np.random.normal(mu_C, sigma_C, batch_size)
-
-            mask = (B_additional > 0) & (B_additional <= 1) & (C_additional > 0) & (C_additional <= B_additional)
-
-            B_samples = np.append(B_samples, B_additional[mask])
-            C_samples = np.append(C_samples, C_additional[mask])
-
-            samples_needed = n_model_draws - len(B_samples)
-            if samples_needed <= 0:
-                break
-
-    # Trim to exactly n_model_draws
-    B_samples = B_samples[:n_model_draws]
-    C_samples = C_samples[:n_model_draws]
-
-    # Generate random viewing angles (vectorized)
-    phi, theta = random_viewing_angles(len(B_samples))
-
-    # Calculate projected axis ratios
-    q_model = projected_axis_ratio(phi, theta, B_samples, C_samples)
-
-    # Choose a bin size from a uniform distribution between [0.03 and 0.1]
-    #bin_size = np.random.uniform(0.03, 0.1)
-
-    # Create bins for histogram
-    #bins = np.arange(0, 1 + bin_size, bin_size)
 
     #bins from 0-1 in 0.04 increments
     bins = np.arange(0, 1, 0.04)
@@ -341,10 +302,10 @@ def infer_intrinsic_shape(q_obs, n_walkers=128, n_steps=5000, burn_in=500,
         mu_B = .9
     if mu_C < 0.1:
         mu_C = 0.1
-    if sigma_B > 0.4:
-        sigma_B = 0.4
-    if sigma_C > 0.4:
-        sigma_C = 0.4
+    if sigma_B > 0.5:
+        sigma_B = 0.5
+    if sigma_C > 0.5:
+        sigma_C = 0.5
     #start all walkers at the same initial guess
     pos = np.array([[mu_B, mu_C, sigma_B, sigma_C] for _ in range(n_walkers)])
     #add a little variation to each walker
@@ -442,60 +403,7 @@ def infer_intrinsic_shape(q_obs, n_walkers=128, n_steps=5000, burn_in=500,
 
     return samples, max_prob_params, sampler
 
-def generate_model_projections(params, n_samples=10000):
-    """
-    Generate model projected axis ratios from given parameters.
 
-    Parameters:
-        params (array): [mu_B, mu_C, sigma_B, sigma_C]
-        n_samples (int): Number of model samples to generate
-
-    Returns:
-        array: Model projected axis ratios
-    """
-    mu_B, mu_C, sigma_B, sigma_C = params
-
-    # Generate more samples initially to account for filtering
-    oversample_factor = 2
-    n_initial_samples = int(n_samples * oversample_factor)
-
-    # Create arrays to store B and C values
-    B_samples = np.random.normal(mu_B, sigma_B, n_initial_samples)
-    C_samples = np.random.normal(mu_C, sigma_C, n_initial_samples)
-
-    # Enforce physical constraints: 0 < C <= B <= 1
-    mask = (B_samples > 0) & (B_samples <= 1) & (C_samples > 0) & (C_samples <= B_samples)
-
-    B_samples = B_samples[mask]
-    C_samples = C_samples[mask]
-
-    # If we don't have enough samples after filtering, generate more
-    while len(B_samples) < n_samples:
-        samples_needed = n_samples - len(B_samples)
-        batch_size = min(samples_needed * 2, n_initial_samples)
-
-        B_additional = np.random.normal(mu_B, sigma_B, batch_size)
-        C_additional = np.random.normal(mu_C, sigma_C, batch_size)
-
-        mask = (B_additional > 0) & (B_additional <= 1) & (C_additional > 0) & (C_additional <= B_additional)
-
-        B_samples = np.append(B_samples, B_additional[mask])
-        C_samples = np.append(C_samples, C_additional[mask])
-
-        if len(B_samples) >= n_samples:
-            break
-
-    # Trim to exactly n_samples
-    B_samples = B_samples[:n_samples]
-    C_samples = C_samples[:n_samples]
-
-    # Generate random viewing angles (you'll need to import this function)
-    phi, theta = random_viewing_angles(len(B_samples))
-
-    # Calculate projected axis ratios (you'll need to import this function)
-    q_model = projected_axis_ratio(phi, theta, B_samples, C_samples)
-
-    return q_model
 
 
 def load_results(output_prefix, output_dir="results"):

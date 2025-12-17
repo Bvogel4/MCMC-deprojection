@@ -31,7 +31,7 @@ RANDOM_SEED = 14
 np.random.seed(RANDOM_SEED)
 
 # MCMC parameters (added from test code)
-N_STEPS = 3000  # Number of MCMC steps
+N_STEPS = 5000  # Number of MCMC steps
 BURN_IN = 300 # Number of burn-in steps to discard
 N_CORES = 32  # Number of CPU cores to use for parallel processing
 N_WALKERS = 64  # Number of MCMC walkers

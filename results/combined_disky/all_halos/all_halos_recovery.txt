@@ -4,15 +4,55 @@ PARAMETER RECOVERY ASSESSMENT (Maximum Probability Estimates)
 ================================================================================
 Parameter  True       Estimated    Bias            Frac Bias   
 --------------------------------------------------------------------------------
-μ_B        0.8699     0.7357       -0.1342         -15.4%
-μ_C        0.3592     0.2961       -0.0631         -17.6%
-σ_B        0.0037     0.1847       +0.1810         +4910.3%
-σ_C        0.0156     0.0766       +0.0611         +392.3%
+μ_B        0.8699     0.6669       -0.2030         -23.3%
+μ_C        0.3592     0.3982       +0.0391         +10.9%
+σ_B        0.0037     0.1512       +0.1475         +4000.3%
+σ_C        0.0156     0.0924       +0.0769         +493.8%
 --------------------------------------------------------------------------------
 
 Summary:
-  Mean absolute error: 0.1099
-  Mean |fractional bias|: 1333.9%
+  Mean absolute error: 0.1166
+  Mean |fractional bias|: 1132.1%
 
 Interpretation:
   ✗ Poor recovery: > 20% average bias
+
+================================================================================
+DISTRIBUTION COMPARISON TESTS
+================================================================================
+
+1. Observed vs Model Distribution
+--------------------------------------------------------------------------------
+  Kolmogorov-Smirnov Test:
+    Statistic: 0.166400
+    p-value:   0.000000
+    → Reject null (p ≤ 0.05): distributions are different
+  Earth Mover's Distance: 0.044677
+
+2. Observed vs True Distribution
+--------------------------------------------------------------------------------
+  Kolmogorov-Smirnov Test:
+    Statistic: 0.138400
+    p-value:   0.000000
+    → Reject null (p ≤ 0.05): distributions are different
+  Earth Mover's Distance: 0.071341
+
+3. Model vs True Distribution
+--------------------------------------------------------------------------------
+  Kolmogorov-Smirnov Test:
+    Statistic: 0.122600
+    p-value:   0.000000
+    → Reject null (p ≤ 0.05): distributions are different
+  Earth Mover's Distance: 0.037814
+
+Summary of Distribution Comparisons:
+--------------------------------------------------------------------------------
+  Comparison                KS Stat      KS p-value   EMD         
+  ------------------------- ------------ ------------ ------------
+  Observed vs Model         0.166400     0.000000     0.044677    
+  Observed vs True          0.138400     0.000000     0.071341    
+  Model vs True             0.122600     0.000000     0.037814    
+
+Interpretation:
+  ✓ Model is closer to truth than observations (EMD: 0.037814 < 0.071341)
+  ✗ Model differs significantly from observed data (KS p = 0.0000)

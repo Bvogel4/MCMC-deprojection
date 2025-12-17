@@ -329,7 +329,8 @@ def plot_projected_distributions(q_obs_list, labels=None, colors=None, bin_width
 
 def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, true_params_list=None,
                                             labels=None, colors=None, bin_width=0.04,
-                                            output_file=None, title=None, kde=False,
+                                            output_file=None, q_model = None, q_true=None,
+                                            title=None, kde=False,
                                             model_samples=10000):
     """
     Plot histograms of projected axis ratios for multiple distributions with model and true distribution overlays.
@@ -383,15 +384,11 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, 
             y_kde = kde_obj(x_grid)
             ax.plot(x_grid, y_kde, color=color, linestyle='--', linewidth=2, alpha=1)
 
-        # Initialize variables for KS tests
-        q_model = None
-        q_true = None
 
         # Plot model if parameters are provided
         if model_params_list is not None and i < len(model_params_list):
             if model_params_list[i] is not None:
                 # Generate model projections
-                q_model = generate_model_projections(model_params_list[i], model_samples)
 
                 # Plot model histogram
                 ax.hist(q_model, bins=bins, alpha=1, color='k',
@@ -409,7 +406,6 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, 
             if true_params_list[i] is not None:
                 # Generate true projections from intrinsic shape
                 B_true, C_true, B_err, C_err = true_params_list[i]
-                q_true = generate_model_projections([B_true, C_true, B_err, C_err], model_samples)
 
                 # Plot true distribution histogram
                 ax.hist(q_true, bins=bins, alpha=1, color=true_color,
