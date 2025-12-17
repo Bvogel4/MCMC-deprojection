@@ -9,15 +9,12 @@ from scipy import stats
 import matplotlib.pyplot as plt
 from galaxy_ellipse_collection import GalaxyEllipseCollection
 
-# load tangos data
-# Set environment variables
-# Set environment variables
-os.environ['TANGOS_DB_CONNECTION'] = '/home/bk639/data/test_dbs/FIRE_test.db'
-#os.environ['TANGOS_SIMULATION_FOLDER'] = '/home/bk639/data/CDM_z0'
-os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
-#add python path /home/bk639/MorphologyMeasurements/Code/tangos
+#load configs
 import sys
-sys.path.append('/home/bk639/FIRE_analsis_tools/')
+from config import db_connection, sys_path
+os.environ['TANGOS_DB_CONNECTION'] = db_connection
+os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
+sys.path.append(sys_path)
 import tangos
 
 tangos_sims = tangos.all_simulations()
@@ -39,7 +36,7 @@ N_ANGLES_PER_HALO = 2000  # Number of angles to sample for each halo
 N_ANGLES_PER_HALO_ALL = 5000 # Number of angles to sample for each halo when running all combined
 
 # Set force_rerun to False to use existing results if available
-force_rerun = True
+force_rerun = False
 
 
 # Disky/Non-disky classification thresholds

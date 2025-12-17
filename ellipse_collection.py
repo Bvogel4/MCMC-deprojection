@@ -9,18 +9,17 @@ import os
 from logging import exception
 import matplotlib.colors as mcolors
 import colorsys
+import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 
 # Set environment variables
-os.environ['TANGOS_DB_CONNECTION'] = '/home/bk639/data/test_dbs/FIRE_test.db'
-#os.environ['TANGOS_SIMULATION_FOLDER'] = '/home/bk639/data/CDM_z0'
+from config import db_connection, sys_path
+os.environ['TANGOS_DB_CONNECTION'] = db_connection
 os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
-#add python path /home/bk639/MorphologyMeasurements/Code/tangos
-import sys
-sys.path.append('/home/bk639/FIRE_analsis_tools/')
+sys.path.append(sys_path)
 import tangos
 sims = tangos.all_simulations()
 import mytangosproperty
