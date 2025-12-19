@@ -14,6 +14,8 @@ import os
 from shape_inference import generate_model_projections
 from matplotlib.patches import Ellipse
 
+from scipy.stats import ks_2samp
+
 
 # KF observational data
 KF_DATA = {
@@ -324,9 +326,11 @@ def plot_projected_distributions(q_obs_list, labels=None, colors=None, bin_width
 
 
 
+
 def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, true_params_list=None,
                                             labels=None, colors=None, bin_width=0.04,
-                                            output_file=None, title=None, kde=False,
+                                            output_file=None, q_model = None, q_true=None,
+                                            title=None, kde=False,
                                             model_samples=10000):
     """
     Plot histograms of projected axis ratios for multiple distributions with model and true distribution overlays.
@@ -347,7 +351,7 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, 
         figure: Histogram plot figure
     """
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(10, 7))  # Slightly larger to accommodate KS test results
 
     # Set default colors if not provided
     if colors is None:
@@ -360,6 +364,10 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, 
     # Calculate bin edges
     bins = np.arange(0, 1.01, bin_width)
     true_color = 'red'
+
+    # Store KS test results for plotting
+    ks_results_text = []
+
     # Plot histogram for each distribution
     for i, (q_obs, label, color) in enumerate(zip(q_obs_list, labels, colors)):
         if color == 'red':
@@ -376,11 +384,11 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, 
             y_kde = kde_obj(x_grid)
             ax.plot(x_grid, y_kde, color=color, linestyle='--', linewidth=2, alpha=1)
 
+
         # Plot model if parameters are provided
         if model_params_list is not None and i < len(model_params_list):
             if model_params_list[i] is not None:
                 # Generate model projections
-                q_model = generate_model_projections(model_params_list[i], model_samples)
 
                 # Plot model histogram
                 ax.hist(q_model, bins=bins, alpha=1, color='k',
@@ -393,15 +401,13 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, 
                     y_kde_model = kde_model(x_grid)
                     ax.plot(x_grid, y_kde_model, color='k', linestyle='--',
                             linewidth=2, alpha=1)
+
         if true_params_list is not None and i < len(true_params_list):
             if true_params_list[i] is not None:
                 # Generate true projections from intrinsic shape
                 B_true, C_true, B_err, C_err = true_params_list[i]
-                q_true = generate_model_projections([B_true, C_true,B_err,C_err], model_samples)
 
                 # Plot true distribution histogram
-                #make sure color doesn't clash with parameter color
-
                 ax.hist(q_true, bins=bins, alpha=1, color=true_color,
                         label=f"{label} (True)", density=True, histtype='step',
                         linewidth=2.5, linestyle='-')
@@ -413,18 +419,63 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, 
                     ax.plot(x_grid, y_kde_true, color=true_color, linestyle=':',
                             linewidth=2, alpha=1)
 
+        # Perform KS tests between distribution pairs
+        print(f"\n{'=' * 60}")
+        print(f"KS Test Results for {label}")
+        print('=' * 60)
+
+        ks_text_lines = [f"{label}:"]
+
+        # Observed vs Model
+        if q_model is not None:
+            ks_stat_obs_model, p_val_obs_model = ks_2samp(q_obs, q_model)
+            print(f"Observed vs Model:")
+            print(f"  KS statistic: {ks_stat_obs_model:.4f}")
+            print(f"  p-value: {p_val_obs_model:.4e}")
+            print(
+                f"  Interpretation: {'Distributions are similar (fail to reject H0)' if p_val_obs_model > 0.05 else 'Distributions are different (reject H0)'}")
+            ks_text_lines.append(f"  Obs vs Model: D={ks_stat_obs_model:.3f}, p={p_val_obs_model:.2e}")
+
+        # Observed vs True
+        if q_true is not None:
+            ks_stat_obs_true, p_val_obs_true = ks_2samp(q_obs, q_true)
+            print(f"\nObserved vs True:")
+            print(f"  KS statistic: {ks_stat_obs_true:.4f}")
+            print(f"  p-value: {p_val_obs_true:.4e}")
+            print(
+                f"  Interpretation: {'Distributions are similar (fail to reject H0)' if p_val_obs_true > 0.05 else 'Distributions are different (reject H0)'}")
+            ks_text_lines.append(f"  Obs vs True: D={ks_stat_obs_true:.3f}, p={p_val_obs_true:.2e}")
+
+        # Model vs True
+        if q_model is not None and q_true is not None:
+            ks_stat_model_true, p_val_model_true = ks_2samp(q_model, q_true)
+            print(f"\nModel vs True:")
+            print(f"  KS statistic: {ks_stat_model_true:.4f}")
+            print(f"  p-value: {p_val_model_true:.4e}")
+            print(
+                f"  Interpretation: {'Distributions are similar (fail to reject H0)' if p_val_model_true > 0.05 else 'Distributions are different (reject H0)'}")
+            ks_text_lines.append(f"  Model vs True: D={ks_stat_model_true:.3f}, p={p_val_model_true:.2e}")
+
+        if len(ks_text_lines) > 1:  # Only add if we have actual results
+            ks_results_text.extend(ks_text_lines)
+
     # Set labels and title
     ax.set_xlabel(r'Projected Axis Ratio ($q = b/a$)', fontsize=30)
     ax.set_ylabel('Density', fontsize=30)
 
-    #make axis ticks larger
+    # Make axis ticks larger
     ax.tick_params(axis='both', which='major', labelsize=20)
 
-    # if title:
-    #     ax.set_title(title, fontsize=16)
-
     # Add legend
-    ax.legend(fontsize=20)
+    ax.legend(fontsize=16, loc='upper left')
+
+    # Add KS test results as text box on the plot
+    if ks_results_text:
+        ks_text = '\n'.join(ks_results_text)
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+        ax.text(0.98, 0.98, ks_text, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', horizontalalignment='right',
+                bbox=props, family='monospace')
 
     # Add grid
     ax.grid(True, alpha=0.3)
@@ -787,3 +838,5 @@ def plot_statistics(results_dict, output_file=None, title=None):
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
     return fig
+
+

@@ -84,6 +84,13 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
         for i, eps in enumerate(ellipticities):
             if i < len(reff_multipliers):
                 original_values[i].append(float(eps))
+                
+    print(f"Original points count: {len(original_points)}")
+
+    for i in range(len(reff_multipliers)):
+        vals = original_values[i]
+        nan_count = sum(1 for v in vals if np.isnan(v))
+        print(f"reff_index {i} (mult={reff_multipliers[i]}): {len(vals)} values, {nan_count} NaNs")
 
     # Now create extended dataset with periodic boundaries
     extended_points = original_points.copy()
@@ -143,36 +150,45 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
 
     # filter out nan data points:
     # Filter out NaN values before creating interpolators
-    extended_points_filtered = []
+
+    extended_points_filtered = {}  # ← Change to dict
     for i in range(len(reff_multipliers)):
         if len(extended_values[i]) == 0:
             continue
 
-        # Convert to numpy arrays for efficient filtering
         points_array = np.array(extended_points)
         values_array = np.array(extended_values[i])
 
-        # Create boolean mask for non-NaN values
         valid_mask = ~np.isnan(values_array)
 
-        # Apply mask to filter out NaN values
         points_array = points_array[valid_mask]
         values_array = values_array[valid_mask]
 
-        # Store the filtered arrays back for interpolation
-        # extended_points_filtered = points_array
-        extended_points_filtered.append(points_array)
-        extended_values[i] = values_array
+        # Only store if there's valid data after filtering
+        if len(values_array) > 0:
+            extended_points_filtered[i] = points_array  # ← Use dict with index as key
+            extended_values[i] = values_array
+        else:
+            extended_values[i] = []  # Mark as empty
+    for i in range(len(reff_multipliers)):
+        print(f"After filtering reff_index {i}: {len(extended_values[i])} valid values")
+    # Create interpolators
+    for i in range(len(reff_multipliers)):
+        if i not in extended_points_filtered or len(extended_values[i]) == 0:
+            continue
+
+        points_array = extended_points_filtered[i]
+        values_array = np.array(extended_values[i])
 
     # Create interpolators based on selected method using filtered dataset
     interpolators = {}
     fallback_interpolators = {}
 
     for i in range(len(reff_multipliers)):
-        if len(extended_values[i]) == 0:
+        if i not in extended_points_filtered or len(extended_values[i]) == 0:
             continue
 
-        points_array = np.array(extended_points_filtered[i])
+        points_array = extended_points_filtered[i]  # ← Now correctly keyed
         values_array = np.array(extended_values[i])
         #assert lengths are the same
         assert len(points_array) == len(values_array), f'length of points, is not the same as values for interpolation: {len(points_array)} != {len(values_array)}'
@@ -208,6 +224,8 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
             y_angle = y_angle % 360
 
         if reff_index not in interpolators:
+            #show what reff_index was requested and what multipliers are available
+            print(f"Available reff_multipliers: {reff_multipliers}")
             raise ValueError(f"No data for reff_index {reff_index} (multiplier={reff_multipliers[reff_index]})")
 
         # Interpolate based on selected method and coordinate system
@@ -361,6 +379,231 @@ def check_existing_results(output_dir, prefix):
 
     return None
 
+
+def assess_parameter_recovery(max_prob_params, true_params,
+                              param_names=['μ_B', 'μ_C', 'σ_B', 'σ_C'],
+                              param_errors=None,
+                              q_obs=None, q_model=None, q_true=None):
+    """
+    Assess how well the maximum probability MCMC estimates recover true parameter values.
+
+    Parameters:
+        max_prob_params: Array of maximum probability parameter estimates [mu_B, mu_C, sigma_B, sigma_C]
+        true_params: Array of true parameter values [B_true, C_true, B_err_true, C_err_true]
+        param_names: Names of parameters for display
+        param_errors: Optional array of parameter uncertainties (e.g., from posterior std)
+        q_obs: Optional array of observed distribution values
+        q_model: Optional array of model distribution values (from estimated parameters)
+        q_true: Optional array of true distribution values (from true parameters)
+
+    Returns:
+        dict: Recovery statistics including 'output_text' for saving to file
+    """
+    import numpy as np
+    from scipy import stats
+
+    results = {
+        'param_names': param_names,
+        'true_values': true_params,
+        'estimated_values': max_prob_params,
+        'bias': [],
+        'fractional_bias': [],
+        'absolute_error': [],
+    }
+
+    if param_errors is not None:
+        results['param_errors'] = param_errors
+        results['sigma_from_true'] = []
+        results['within_1sigma'] = []
+        results['within_2sigma'] = []
+
+    # Build output string
+    lines = []
+
+    lines.append("")
+    lines.append("=" * 80)
+    lines.append("PARAMETER RECOVERY ASSESSMENT (Maximum Probability Estimates)")
+    lines.append("=" * 80)
+
+    if param_errors is not None:
+        lines.append(f"{'Parameter':<10} {'True':<10} {'Estimated':<12} {'Error':<10} {'Bias':<12} {'σ away':<10}")
+        lines.append("-" * 80)
+    else:
+        lines.append(f"{'Parameter':<10} {'True':<10} {'Estimated':<12} {'Bias':<15} {'Frac Bias':<12}")
+        lines.append("-" * 80)
+
+    for i, (name, true_val, est_val) in enumerate(zip(param_names, true_params, max_prob_params)):
+        bias = est_val - true_val
+        frac_bias = (bias / true_val * 100) if true_val != 0 else np.nan
+        abs_error = abs(bias)
+
+        results['bias'].append(bias)
+        results['fractional_bias'].append(frac_bias)
+        results['absolute_error'].append(abs_error)
+
+        if param_errors is not None:
+            sigma_away = abs(bias) / param_errors[i] if param_errors[i] > 0 else np.nan
+            results['sigma_from_true'].append(sigma_away)
+            results['within_1sigma'].append(sigma_away <= 1)
+            results['within_2sigma'].append(sigma_away <= 2)
+
+            lines.append(
+                f"{name:<10} {true_val:<10.4f} {est_val:<12.4f} {param_errors[i]:<10.4f} {bias:+.4f}      {sigma_away:<10.2f}")
+        else:
+            lines.append(f"{name:<10} {true_val:<10.4f} {est_val:<12.4f} {bias:+.4f}         {frac_bias:+.1f}%")
+
+    lines.append("-" * 80)
+
+    # Summary statistics
+    avg_abs_error = np.mean(results['absolute_error'])
+    avg_frac_bias = np.nanmean(np.abs(results['fractional_bias']))
+
+    lines.append("")
+    lines.append("Summary:")
+    lines.append(f"  Mean absolute error: {avg_abs_error:.4f}")
+    lines.append(f"  Mean |fractional bias|: {avg_frac_bias:.1f}%")
+
+    if param_errors is not None:
+        avg_sigma_away = np.nanmean(results['sigma_from_true'])
+        n_within_1sigma = sum(results['within_1sigma'])
+        n_within_2sigma = sum(results['within_2sigma'])
+        lines.append(f"  Average σ from true: {avg_sigma_away:.2f}")
+        lines.append(f"  Within 1σ: {n_within_1sigma}/{len(param_names)}")
+        lines.append(f"  Within 2σ: {n_within_2sigma}/{len(param_names)}")
+
+    # Interpretation
+    lines.append("")
+    lines.append("Interpretation:")
+    if avg_frac_bias < 5:
+        lines.append("  ✓ Excellent recovery: < 5% average bias")
+    elif avg_frac_bias < 10:
+        lines.append("  ✓ Good recovery: < 10% average bias")
+    elif avg_frac_bias < 20:
+        lines.append("  ~ Moderate recovery: 10-20% average bias")
+    else:
+        lines.append("  ✗ Poor recovery: > 20% average bias")
+
+    # ========================================================================
+    # DISTRIBUTION COMPARISON TESTS
+    # ========================================================================
+    if q_obs is not None and q_model is not None:
+        lines.append("")
+        lines.append("=" * 80)
+        lines.append("DISTRIBUTION COMPARISON TESTS")
+        lines.append("=" * 80)
+
+        results['distribution_tests'] = {}
+
+        # Test 1: Observed vs Model
+        lines.append("")
+        lines.append("1. Observed vs Model Distribution")
+        lines.append("-" * 80)
+
+        ks_stat_om, ks_pval_om = stats.ks_2samp(q_obs, q_model)
+        emd_om = stats.wasserstein_distance(q_obs, q_model)
+
+        results['distribution_tests']['obs_vs_model'] = {
+            'ks_statistic': ks_stat_om,
+            'ks_pvalue': ks_pval_om,
+            'earth_movers_distance': emd_om
+        }
+
+        lines.append(f"  Kolmogorov-Smirnov Test:")
+        lines.append(f"    Statistic: {ks_stat_om:.6f}")
+        lines.append(f"    p-value:   {ks_pval_om:.6f}")
+        if ks_pval_om > 0.05:
+            lines.append(f"    → Cannot reject null (p > 0.05): distributions are similar")
+        else:
+            lines.append(f"    → Reject null (p ≤ 0.05): distributions are different")
+
+        lines.append(f"  Earth Mover's Distance: {emd_om:.6f}")
+
+        # Test 2: Observed vs True (if q_true provided)
+        if q_true is not None:
+            lines.append("")
+            lines.append("2. Observed vs True Distribution")
+            lines.append("-" * 80)
+
+            ks_stat_ot, ks_pval_ot = stats.ks_2samp(q_obs, q_true)
+            emd_ot = stats.wasserstein_distance(q_obs, q_true)
+
+            results['distribution_tests']['obs_vs_true'] = {
+                'ks_statistic': ks_stat_ot,
+                'ks_pvalue': ks_pval_ot,
+                'earth_movers_distance': emd_ot
+            }
+
+            lines.append(f"  Kolmogorov-Smirnov Test:")
+            lines.append(f"    Statistic: {ks_stat_ot:.6f}")
+            lines.append(f"    p-value:   {ks_pval_ot:.6f}")
+            if ks_pval_ot > 0.05:
+                lines.append(f"    → Cannot reject null (p > 0.05): distributions are similar")
+            else:
+                lines.append(f"    → Reject null (p ≤ 0.05): distributions are different")
+
+            lines.append(f"  Earth Mover's Distance: {emd_ot:.6f}")
+
+            # Test 3: Model vs True
+            lines.append("")
+            lines.append("3. Model vs True Distribution")
+            lines.append("-" * 80)
+
+            ks_stat_mt, ks_pval_mt = stats.ks_2samp(q_model, q_true)
+            emd_mt = stats.wasserstein_distance(q_model, q_true)
+
+            results['distribution_tests']['model_vs_true'] = {
+                'ks_statistic': ks_stat_mt,
+                'ks_pvalue': ks_pval_mt,
+                'earth_movers_distance': emd_mt
+            }
+
+            lines.append(f"  Kolmogorov-Smirnov Test:")
+            lines.append(f"    Statistic: {ks_stat_mt:.6f}")
+            lines.append(f"    p-value:   {ks_pval_mt:.6f}")
+            if ks_pval_mt > 0.05:
+                lines.append(f"    → Cannot reject null (p > 0.05): distributions are similar")
+            else:
+                lines.append(f"    → Reject null (p ≤ 0.05): distributions are different")
+
+            lines.append(f"  Earth Mover's Distance: {emd_mt:.6f}")
+
+            # Comparative summary
+            lines.append("")
+            lines.append("Summary of Distribution Comparisons:")
+            lines.append("-" * 80)
+            lines.append(f"  {'Comparison':<25} {'KS Stat':<12} {'KS p-value':<12} {'EMD':<12}")
+            lines.append(f"  {'-' * 25} {'-' * 12} {'-' * 12} {'-' * 12}")
+            lines.append(f"  {'Observed vs Model':<25} {ks_stat_om:<12.6f} {ks_pval_om:<12.6f} {emd_om:<12.6f}")
+            lines.append(f"  {'Observed vs True':<25} {ks_stat_ot:<12.6f} {ks_pval_ot:<12.6f} {emd_ot:<12.6f}")
+            lines.append(f"  {'Model vs True':<25} {ks_stat_mt:<12.6f} {ks_pval_mt:<12.6f} {emd_mt:<12.6f}")
+
+            lines.append("")
+            lines.append("Interpretation:")
+            if emd_mt < emd_ot:
+                lines.append(f"  ✓ Model is closer to truth than observations (EMD: {emd_mt:.6f} < {emd_ot:.6f})")
+            else:
+                lines.append(f"  → Model is farther from truth than observations (EMD: {emd_mt:.6f} ≥ {emd_ot:.6f})")
+
+            if ks_pval_om > 0.05:
+                lines.append(f"  ✓ Model adequately represents observed data (KS p = {ks_pval_om:.4f})")
+            else:
+                lines.append(f"  ✗ Model differs significantly from observed data (KS p = {ks_pval_om:.4f})")
+
+    # Convert lists to arrays for easier use
+    results['bias'] = np.array(results['bias'])
+    results['fractional_bias'] = np.array(results['fractional_bias'])
+    results['absolute_error'] = np.array(results['absolute_error'])
+    results['avg_fractional_bias'] = avg_frac_bias
+    results['avg_absolute_error'] = avg_abs_error
+
+    # Store the full output text
+    output_text = '\n'.join(lines)
+    results['output_text'] = output_text
+
+    # Print to terminal
+    print(output_text)
+
+    return results
 
 
 
@@ -688,6 +931,20 @@ class GalaxyEllipseCollection:
         ca_s = np.mean(ca_s)
 
         true_params = np.array([ba_s, ca_s, ba_s_sigma, ca_s_sigma])
+        model_samples = 10000
+
+        q_true,_,_ = generate_model_projections([ba_s, ca_s, ba_s_sigma, ca_s_sigma], model_samples)
+        q_model,_,_ = generate_model_projections(max_prob_params, model_samples)
+
+
+        print(q_obs,q_true,q_model)
+
+        recovery_results = assess_parameter_recovery(max_prob_params, true_params, q_obs=q_obs, q_model=q_model, q_true=q_true)
+
+        # Save recovery results to text file
+        with open(full_output_dir / f"{output_prefix}_recovery.txt", 'w') as f:
+            f.write(recovery_results['output_text'])
+        
 
         # Plot results
         self.plot_results(
@@ -695,6 +952,8 @@ class GalaxyEllipseCollection:
             max_prob_params=max_prob_params,
             true_params=true_params,
             q_obs=q_obs,
+            q_model=q_model,
+            q_true=q_true,
             chain=chain,
             burn_in=burn_in,
             label=label,
@@ -705,7 +964,7 @@ class GalaxyEllipseCollection:
 
         return samples, max_prob_params, sampler, q_obs
 
-    def plot_results(self, samples, max_prob_params, q_obs, true_params=None,
+    def plot_results(self, samples, max_prob_params, q_obs,q_model=None,q_true=None, true_params=None,
                      chain=None, burn_in=500, label="Model", color="blue",
                      output_prefix=None, output_dir="results"):
         """
@@ -734,6 +993,7 @@ class GalaxyEllipseCollection:
         # Plot histogram of projections WITH model overlay
         fig_hist = plot_projected_distributions_with_model(
             [q_obs], [max_prob_params], [true_params],[label], [color],
+            q_model=q_model, q_true=q_true,
             output_file=os.path.join(output_dir, f"{output_prefix}_projections_comparison.png"),
             title=f"Projected Axis Ratios: Observed vs Model for {label}"
         )
@@ -784,26 +1044,6 @@ class GalaxyEllipseCollection:
         )
         plt.close(fig_shapes_all)
 
-        # Generate some diagnostic information about the fit
-        print(f"\n=== Model Fit Diagnostics for {label} ===")
-        if max_prob_params is not None:
-            mu_B, mu_C, sigma_B, sigma_C = max_prob_params
-            print(f"Best-fit parameters:")
-            print(f"  μB = {mu_B:.3f} ± {sigma_B:.3f}")
-            print(f"  μC = {mu_C:.3f} ± {sigma_C:.3f}")
-
-            # Generate model sample for comparison
-            q_model = generate_model_projections(max_prob_params, len(q_obs))
-
-            # Basic statistics comparison
-            print(f"\nDistribution comparison:")
-            print(f"  Observed: mean={np.mean(q_obs):.3f}, std={np.std(q_obs):.3f}")
-            print(f"  Model:    mean={np.mean(q_model):.3f}, std={np.std(q_model):.3f}")
-
-            # KS test for goodness of fit
-            from scipy.stats import ks_2samp
-            ks_stat, ks_pvalue = ks_2samp(q_obs, q_model)
-            print(f"  KS test: D={ks_stat:.3f}, p-value={ks_pvalue:.3f}")
 
     def get_all_halo_keys(self):
         """Return a list of all (sim_name, halo_id) keys in the collection."""
