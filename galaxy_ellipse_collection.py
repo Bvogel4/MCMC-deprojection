@@ -1,11 +1,10 @@
-#this contains a bunch of helperfunction for MCMC_sims to run and plot MCMC codes from shape_inference and shape_plotting. 
+#this contains a bunch of helper functions for MCMC_sims to run and plot MCMC codes from shape_inference and shape_plotting.
 
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import time
-import numpy as np
 import pickle
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator, Rbf
 

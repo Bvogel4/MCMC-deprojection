@@ -11,7 +11,7 @@ from galaxy_ellipse_collection import GalaxyEllipseCollection
 
 #load configs
 import sys
-from config import db_connection, sys_path
+from config import db_connection, sys_path, results_output_directory
 os.environ['TANGOS_DB_CONNECTION'] = db_connection
 os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
 sys.path.append(sys_path)
@@ -28,15 +28,15 @@ RANDOM_SEED = 14
 np.random.seed(RANDOM_SEED)
 
 # MCMC parameters (added from test code)
-N_STEPS = 5000  # Number of MCMC steps
+N_STEPS = 3000  # Number of MCMC steps
 BURN_IN = 300 # Number of burn-in steps to discard
 N_CORES = 32  # Number of CPU cores to use for parallel processing
 N_WALKERS = 64  # Number of MCMC walkers
 N_ANGLES_PER_HALO = 2000  # Number of angles to sample for each halo
-N_ANGLES_PER_HALO_ALL = 5000 # Number of angles to sample for each halo when running all combined
+N_ANGLES_PER_HALO_ALL = 3000 # Number of angles to sample for each halo when running all combined
 
 # Set force_rerun to False to use existing results if available
-force_rerun = False
+force_rerun = True
 
 
 # Disky/Non-disky classification thresholds
@@ -223,7 +223,7 @@ if __name__ == "__main__":
                 halo = tangos.get_halo(halo_ref)
                 hid = halo.basename.split('_')[1]
                 # Get the properties
-                reff = halo[f'image_reffs_{band}'][0]
+                reff = halo[f'image_reffs_{band}'][0] #faceon effective radius
                 ba_s_smoothed = halo.calculate('ba_s_smoothed()')
                 ca_s_smoothed = halo.calculate('ca_s_smoothed()')
                 ba_s = ba_s_smoothed(2 * reff)
@@ -317,7 +317,7 @@ if __name__ == "__main__":
         n_cores=N_CORES,
         n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
         force_rerun=force_rerun,
-        output_dir='results/combined_all',
+        output_dir=results_output_directory+'combined_all',
         label = 'All galaxies',
         color = 'green'
     )
@@ -328,7 +328,7 @@ if __name__ == "__main__":
             'max_prob_params': all_max_params,
             'q_obs': all_q_obs
         }},
-        output_file="results/summary/combined_summary_all.csv"
+        output_file=results_output_directory + '/summary/combined_summary_all.csv'
     )
 
     # ======================================
@@ -346,7 +346,7 @@ if __name__ == "__main__":
             n_cores=N_CORES,
             n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
             force_rerun=force_rerun,
-            output_dir='results/combined_disky',
+            output_dir=results_output_directory+'disky',
             label = 'Disky',
             color = 'blue'
         )
@@ -357,7 +357,7 @@ if __name__ == "__main__":
                 'max_prob_params': disky_max_params,
                 'q_obs': disky_q_obs
             }},
-            output_file="results/summary/combined_summary_disky.csv"
+            output_file=results_output_directory + '/summary/combined_summary_disky.csv'
         )
 
         print(f"Disky galaxies analysis complete!")
@@ -379,7 +379,7 @@ if __name__ == "__main__":
             n_cores=N_CORES,
             n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
             force_rerun=force_rerun,
-            output_dir='results/combined_non_disky',
+            output_dir=results_output_directory + 'combined_non_disky',
             label = 'Nondisky',
             color = 'red'
         )
@@ -390,7 +390,7 @@ if __name__ == "__main__":
                 'max_prob_params': non_disky_max_params,
                 'q_obs': non_disky_q_obs
             }},
-            output_file="results/summary/combined_summary_non_disky.csv"
+            output_file=results_output_directory + '/summary/combined_summary_non_disky.csv'
         )
 
         print(f"Non-disky galaxies analysis complete!")
@@ -450,7 +450,7 @@ if __name__ == "__main__":
         })
 
     comparison_df = pd.DataFrame(comparison_data)
-    comparison_df.to_csv("results/summary/category_comparison.csv", index=False)
+    comparison_df.to_csv(results_output_directory + '/summary/category_comparison.csv', index=False)
 
     print("\nComparison Summary:")
     print(comparison_df.to_string(index=False))
