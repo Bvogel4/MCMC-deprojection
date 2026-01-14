@@ -28,15 +28,15 @@ RANDOM_SEED = 14
 np.random.seed(RANDOM_SEED)
 
 # MCMC parameters (added from test code)
-N_STEPS = 5000  # Number of MCMC steps
+N_STEPS = 3000  # Number of MCMC steps
 BURN_IN = 300 # Number of burn-in steps to discard
 N_CORES = 32  # Number of CPU cores to use for parallel processing
 N_WALKERS = 64  # Number of MCMC walkers
 N_ANGLES_PER_HALO = 2000  # Number of angles to sample for each halo
-N_ANGLES_PER_HALO_ALL = 5000 # Number of angles to sample for each halo when running all combined
+N_ANGLES_PER_HALO_ALL = 3000 # Number of angles to sample for each halo when running all combined
 
 # Set force_rerun to False to use existing results if available
-force_rerun = False
+force_rerun = True
 
 
 # Disky/Non-disky classification thresholds

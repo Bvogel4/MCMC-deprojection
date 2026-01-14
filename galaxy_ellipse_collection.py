@@ -1,7 +1,6 @@
 #this contains a bunch of helperfunction for MCMC_sims to run and plot MCMC codes from shape_inference and shape_plotting. 
 
 import os
-import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import time
@@ -225,7 +224,7 @@ def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
 
         if reff_index not in interpolators:
             #show what reff_index was requested and what multipliers are available
-            print(f"Available reff_multipliers: {reff_multipliers}")
+            #print(f"Available reff_multipliers: {reff_multipliers}")
             raise ValueError(f"No data for reff_index {reff_index} (multiplier={reff_multipliers[reff_index]})")
 
         # Interpolate based on selected method and coordinate system
