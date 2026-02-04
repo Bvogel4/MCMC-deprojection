@@ -469,13 +469,13 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, 
     # Add legend
     ax.legend(fontsize=16, loc='upper left')
 
-    # Add KS test results as text box on the plot
-    if ks_results_text:
-        ks_text = '\n'.join(ks_results_text)
-        props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-        ax.text(0.98, 0.98, ks_text, transform=ax.transAxes, fontsize=10,
-                verticalalignment='top', horizontalalignment='right',
-                bbox=props, family='monospace')
+    # # Add KS test results as text box on the plot
+    # if ks_results_text:
+    #     ks_text = '\n'.join(ks_results_text)
+    #     props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+    #     ax.text(0.98, 0.98, ks_text, transform=ax.transAxes, fontsize=10,
+    #             verticalalignment='top', horizontalalignment='right',
+    #             bbox=props, family='monospace')
 
     # Add grid
     ax.grid(True, alpha=0.3)

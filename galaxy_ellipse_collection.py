@@ -7,6 +7,7 @@ import time
 import numpy as np
 import pickle
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator, Rbf
+from matplotlib.colors import is_color_like
 
 from shape_inference import (
     generate_projections,
@@ -943,6 +944,10 @@ class GalaxyEllipseCollection:
         # Save recovery results to text file
         with open(full_output_dir / f"{output_prefix}_recovery.txt", 'w') as f:
             f.write(recovery_results['output_text'])
+
+        #check that color is valid, if not, set to none. (might already be none)
+        if not is_color_like(color):
+            color = None
         
 
         # Plot results

@@ -36,13 +36,24 @@ N_ANGLES_PER_HALO = 2000  # Number of angles to sample for each halo
 N_ANGLES_PER_HALO_ALL = 3000 # Number of angles to sample for each halo when running all combined
 
 # Set force_rerun to False to use existing results if available
-force_rerun = True
+force_rerun = False
 
 
 # Disky/Non-disky classification thresholds
 BA_THRESHOLD = 0.65
 CA_THRESHOLD = 0.4
 
+MASS_BINS = {
+    'KF_low': (7.0, 8.5),
+    'KF_med': (8.5, 9.0),
+    'KF_high': (9.0, 9.6)
+}
+
+def extract_single_value(value):
+    """Extract scalar value from potentially nested data structures"""
+    if isinstance(value, list):
+        return value[0]
+    return float(value)
 
 # Loading function remains the same
 def load_and_process_halo_data(sim_name=None, halo_id=None, pickle_filename='ellipse_data.pickle'):
@@ -205,10 +216,18 @@ if __name__ == "__main__":
     disky_collection = GalaxyEllipseCollection()
     non_disky_collection = GalaxyEllipseCollection()
 
+    kf_low_collection = GalaxyEllipseCollection()
+    kf_med_collection = GalaxyEllipseCollection()
+    kf_high_collection = GalaxyEllipseCollection()
+
     # Track statistics
     disky_count = 0
     non_disky_count = 0
     skipped_count = 0
+
+    kf_low_count = 0
+    kf_med_count = 0
+    kf_high_count = 0
 
     # Load ellipse data from pickle file
     with open('ellipse_data.pickle', 'rb') as f:
@@ -228,6 +247,13 @@ if __name__ == "__main__":
                 ca_s_smoothed = halo.calculate('ca_s_smoothed()')
                 ba_s = ba_s_smoothed(2 * reff)
                 ca_s = ca_s_smoothed(2 * reff)
+                # Extract masses
+                if 'finder_star_mass' in halo:
+                    stellar_mass = halo.get('finder_star_mass')
+                elif 'n_star' in halo:
+                    stellar_mass = halo.get('M_star')
+                stellar_mass = extract_single_value(stellar_mass)
+                log_stellar_mass = np.log10(stellar_mass)
                 # Make sure these have sane values between 0 and 1
                 assert 0 <= ba_s <= 1, f"simulation {sim}, halo {hid}: ba_s out of bounds: {ba_s}"
                 assert 0 <= ca_s <= 1, f"simulation {sim}, halo {hid}: ca_s out of bounds: {ca_s}"
@@ -284,11 +310,53 @@ if __name__ == "__main__":
                 non_disky_count += 1
                 print(f"  → Classified as NON-DISKY")
 
+                # Classify by mass bin
+                if MASS_BINS['KF_low'][0] <= log_stellar_mass < MASS_BINS['KF_low'][1]:
+                    kf_low_collection.add_halo(
+                        sim_name=sim,
+                        halo_id=hid,
+                        halo_data=halo_data,
+                        reff_multipliers=[radius],
+                        interpolation_method='linear',
+                        coordinate_system='angles'
+                    )
+                    kf_low_count += 1
+                elif MASS_BINS['KF_med'][0] <= log_stellar_mass < MASS_BINS['KF_med'][1]:
+                    kf_med_collection.add_halo(
+                        sim_name=sim,
+                        halo_id=hid,
+                        halo_data=halo_data,
+                        reff_multipliers=[radius],
+                        interpolation_method='linear',
+                        coordinate_system='angles'
+                    )
+                    kf_med_count += 1
+                elif MASS_BINS['KF_high'][0] <= log_stellar_mass < MASS_BINS['KF_high'][1]:
+                    kf_high_collection.add_halo(
+                        sim_name=sim,
+                        halo_id=hid,
+                        halo_data=halo_data,
+                        reff_multipliers=[radius],
+                        interpolation_method='linear',
+                        coordinate_system='angles'
+                    )
+                    kf_high_count += 1
+
+
+
+
+
     print(f"\nCollection Summary:")
     print(f"Total halos added: {galaxy_collection.get_halo_count()}")
     print(f"Disky galaxies (BA > {BA_THRESHOLD}, CA > {CA_THRESHOLD}): {disky_count}")
     print(f"Non-disky galaxies: {non_disky_count}")
     print(f"Skipped (errors): {skipped_count}")
+
+    print(f"\nMass Bin Summary:")
+    print(f"KF_low (10^{MASS_BINS['KF_low'][0]} - 10^{MASS_BINS['KF_low'][1]} M☉): {kf_low_count} galaxies")
+    print(f"KF_med (10^{MASS_BINS['KF_med'][0]} - 10^{MASS_BINS['KF_med'][1]} M☉): {kf_med_count} galaxies")
+    print(f"KF_high (10^{MASS_BINS['KF_high'][0]} - 10^{MASS_BINS['KF_high'][1]} M☉): {kf_high_count} galaxies")
+
 
     # ======================================
     # Step 2: Run inference on all halos (original analysis)
@@ -317,7 +385,7 @@ if __name__ == "__main__":
         n_cores=N_CORES,
         n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
         force_rerun=force_rerun,
-        output_dir=results_output_directory+'combined_all',
+        output_dir=results_output_directory+'/combined_all',
         label = 'All galaxies',
         color = 'green'
     )
@@ -346,7 +414,7 @@ if __name__ == "__main__":
             n_cores=N_CORES,
             n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
             force_rerun=force_rerun,
-            output_dir=results_output_directory+'disky',
+            output_dir=results_output_directory+'/combined_disky',
             label = 'Disky',
             color = 'blue'
         )
@@ -379,7 +447,7 @@ if __name__ == "__main__":
             n_cores=N_CORES,
             n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
             force_rerun=force_rerun,
-            output_dir=results_output_directory + 'combined_non_disky',
+            output_dir=results_output_directory + '/combined_non_disky',
             label = 'Nondisky',
             color = 'red'
         )
@@ -396,6 +464,84 @@ if __name__ == "__main__":
         print(f"Non-disky galaxies analysis complete!")
     else:
         print(f"\nNo non-disky galaxies found")
+
+    if kf_low_count > 0:
+        print('\n' + '=' * 50)
+        print(f'Running inference on KF_low galaxies ({kf_low_count} halos)...')
+
+        kf_low_samples, kf_low_max_params, kf_low_sampler, kf_low_q_obs = kf_low_collection.run_inference_all_halos(
+            n_steps=N_STEPS,
+            n_walkers=N_WALKERS,
+            burn_in=BURN_IN,
+            n_cores=N_CORES,
+            n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
+            force_rerun=force_rerun,
+            output_dir=results_output_directory + '/combined_kf_low',
+            label='KF_low',
+            color='red'
+        )
+
+        kf_low_summary_table = create_summary_table(
+            {'Combined_KF_low': {
+                'samples': kf_low_samples,
+                'max_prob_params': kf_low_max_params,
+                'q_obs': kf_low_q_obs
+            }},
+            output_file=results_output_directory + '/summary/combined_summary_kf_low.csv'
+        )
+        print(f"KF_low galaxies analysis complete!")
+
+    if kf_med_count > 0:
+        print('\n' + '=' * 50)
+        print(f'Running inference on KF_med galaxies ({kf_med_count} halos)...')
+
+        kf_med_samples, kf_med_max_params, kf_med_sampler, kf_med_q_obs = kf_med_collection.run_inference_all_halos(
+            n_steps=N_STEPS,
+            n_walkers=N_WALKERS,
+            burn_in=BURN_IN,
+            n_cores=N_CORES,
+            n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
+            force_rerun=force_rerun,
+            output_dir=results_output_directory + '/combined_kf_med',
+            label='KF_med',
+            color='blue'
+        )
+
+        kf_med_summary_table = create_summary_table(
+            {'Combined_KF_med': {
+                'samples': kf_med_samples,
+                'max_prob_params': kf_med_max_params,
+                'q_obs': kf_med_q_obs
+            }},
+            output_file=results_output_directory + '/summary/combined_summary_kf_med.csv'
+        )
+        print(f"KF_med galaxies analysis complete!")
+
+    if kf_high_count > 0:
+        print('\n' + '=' * 50)
+        print(f'Running inference on KF_high galaxies ({kf_high_count} halos)...')
+
+        kf_high_samples, kf_high_max_params, kf_high_sampler, kf_high_q_obs = kf_high_collection.run_inference_all_halos(
+            n_steps=N_STEPS,
+            n_walkers=N_WALKERS,
+            burn_in=BURN_IN,
+            n_cores=N_CORES,
+            n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
+            force_rerun=force_rerun,
+            output_dir=results_output_directory + '/combined_kf_high',
+            label='KF_high',
+            color='green'
+        )
+
+        kf_high_summary_table = create_summary_table(
+            {'Combined_KF_high': {
+                'samples': kf_high_samples,
+                'max_prob_params': kf_high_max_params,
+                'q_obs': kf_high_q_obs
+            }},
+            output_file=results_output_directory + '/summary/combined_summary_kf_high.csv'
+        )
+        print(f"KF_high galaxies analysis complete!")
 
     # ======================================
     # Step 5: Create comparison summary
@@ -449,6 +595,48 @@ if __name__ == "__main__":
             'sigmaC_mean': np.mean(non_disky_samples[:, 3])
         })
 
+    if kf_low_count > 0:
+        comparison_data.append({
+            'Category': 'KF_low',
+            'N_Halos': kf_low_count,
+            'B/A_max_prob': kf_low_max_params[0],
+            'C/A_max_prob': kf_low_max_params[1],
+            'sigmaB_max_prob': kf_low_max_params[2],
+            'sigmaC_max_prob': kf_low_max_params[3],
+            'B/A_mean': np.mean(kf_low_samples[:, 0]),
+            'C/A_mean': np.mean(kf_low_samples[:, 1]),
+            'sigmaB_mean': np.mean(kf_low_samples[:, 2]),
+            'sigmaC_mean': np.mean(kf_low_samples[:, 3])
+        })
+
+    if kf_med_count > 0:
+        comparison_data.append({
+            'Category': 'KF_med',
+            'N_Halos': kf_med_count,
+            'B/A_max_prob': kf_med_max_params[0],
+            'C/A_max_prob': kf_med_max_params[1],
+            'sigmaB_max_prob': kf_med_max_params[2],
+            'sigmaC_max_prob': kf_med_max_params[3],
+            'B/A_mean': np.mean(kf_med_samples[:, 0]),
+            'C/A_mean': np.mean(kf_med_samples[:, 1]),
+            'sigmaB_mean': np.mean(kf_med_samples[:, 2]),
+            'sigmaC_mean': np.mean(kf_med_samples[:, 3])
+        })
+
+    if kf_high_count > 0:
+        comparison_data.append({
+            'Category': 'KF_high',
+            'N_Halos': kf_high_count,
+            'B/A_max_prob': kf_high_max_params[0],
+            'C/A_max_prob': kf_high_max_params[1],
+            'sigmaB_max_prob': kf_high_max_params[2],
+            'sigmaC_max_prob': kf_high_max_params[3],
+            'B/A_mean': np.mean(kf_high_samples[:, 0]),
+            'C/A_mean': np.mean(kf_high_samples[:, 1]),
+            'sigmaB_mean': np.mean(kf_high_samples[:, 2]),
+            'sigmaC_mean': np.mean(kf_high_samples[:, 3])
+        })
+
     comparison_df = pd.DataFrame(comparison_data)
     comparison_df.to_csv(results_output_directory + '/summary/category_comparison.csv', index=False)
 
@@ -458,3 +646,5 @@ if __name__ == "__main__":
     print("\n" + "=" * 50)
     print("Analysis completed successfully!")
     print(f"Results saved in results/summary/")
+
+

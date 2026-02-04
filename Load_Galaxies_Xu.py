@@ -69,6 +69,7 @@ class GalaxyData:
     simulation: str
     halo_id: str
     stellar_mass: float
+    total_luminosity: float
     dynamical_mass: float
     mass_to_light: float
     half_light_radius: float
@@ -380,6 +381,8 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
         halo, halo_ellipse_data
     )
 
+    total_lum = SB_integrated(halo['profile_rbins_v'][0], halo['profile_v_lum_den'][0])
+
     # Get 3D shape functions
     shape_b_over_a = halo.calculate('ba_s_smoothed()')
     shape_c_over_a = halo.calculate('ca_s_smoothed()')
@@ -392,6 +395,7 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
         simulation=sim_name,
         halo_id=halo_id,
         stellar_mass=stellar_mass,
+        total_luminosity=total_lum,
         dynamical_mass=dynamical_mass,
         mass_to_light=mass_to_light,
         half_light_radius=half_light_radius,
@@ -440,14 +444,13 @@ def create_interpolators(halo, halo_ellipse_data) -> Tuple[callable, callable]:
     # Create surface brightness data dict
     sb_data_dict = {}
     # total luminosity at face-on orientation (not significantly different from any other orientation)
-    total_lum = SB_integrated(halo['profile_rbins_v'][0], halo['profile_v_lum_den'][0])
-    print(f'total_lum = {total_lum}')
+
     for i, orientation in enumerate(orientations):
         # Calculate central surface brightness
         if 'profile_mags_v' in halo.keys() and 'profile_binarea_v' in halo.keys():
             mag0 = halo['profile_mags_v'][i][0]
             area0 = halo['profile_binarea_v'][i][0]
-            sigma0 = (10 ** (0.4 * (4.8 - mag0))) / area0 / total_lum  # normalize to total lum
+            sigma0 = (10 ** (0.4 * (4.8 - mag0))) / area0   # normalize to total lum
             sb_data_dict[orientation] = [sigma0]
 
     # Create interpolation functions
