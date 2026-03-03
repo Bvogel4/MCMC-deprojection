@@ -31,7 +31,7 @@ def random_viewing_angles(n):
     phi = np.random.uniform(0, 2 * np.pi, n)
     nu = np.random.uniform(0, 1, n)
     theta = np.arccos(2 * nu - 1)
-    return phi, theta
+    return phi,theta
 
 
 def projected_axis_ratio(phi, theta, B, C):
