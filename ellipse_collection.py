@@ -16,7 +16,7 @@ import numpy as np
 
 
 # Set environment variables
-from config import db_connection, sys_path
+from BWSB_config import db_connection, sys_path, pickle_file, ba_s_key, ca_s_key, results_output_directory
 os.environ['TANGOS_DB_CONNECTION'] = db_connection
 os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
 sys.path.append(sys_path)
@@ -32,10 +32,9 @@ from matplotlib.patches import Ellipse
 import pickle
 import os
 import numpy as np
+
+pickle_filename = pickle_file
 band = 'v'
-image_type = 'stars'
-# Define pickle filename using a consistent pattern
-pickle_filename = f'ellipse_data_{band}_{image_type}.pickle'
 
 # Check if pickle file exists and load it if it does
 if os.path.exists(pickle_filename):
@@ -45,8 +44,9 @@ if os.path.exists(pickle_filename):
 else:
     ellipse_dict = {}
     print(f"Starting with fresh data")
-    
-ellipse_dict = {}
+
+
+
 
 
 def plot_isophotes_testing(images, isophote_params, orientations, reffs, rhalf, filename,
@@ -473,11 +473,18 @@ for sim in sims:
             image_reffs = halo[f'image_reffs_{band}']
             image_orientations = halo[f'image_orientations_{band}']
             Rhalf = halo[f'Rhalf_{band}']
-            isophote_params = halo[f'isophote_parameters_{band}_stars']
+            try:
+                isophote_params = halo[f'isophote_parameters_{band}_stars']
+            except:
+                print(f'No isophote fits found for halo {halo_ref}')
+                continue
+
+            ba = halo[ba_s_key]
+            ca = halo[ca_s_key]
 
             reffs = np.array(image_reffs)
             #print(np.min(reffs),np.max(reffs),np.mean(reffs),np.std(reffs))
-            filename = ('figures/' + str(sim.basename) +'.'+ str(hid)+ '.isophotes.png')
+            filename = (results_output_directory +'/' + str(sim.basename) +'.'+ str(hid)+ '.isophotes.png')
 
             halo_dict = plot_isophotes(halo_images, isophote_params, image_orientations, reffs, Rhalf, filename)
             #save to folder figures

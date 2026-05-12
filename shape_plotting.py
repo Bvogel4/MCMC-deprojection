@@ -263,7 +263,8 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
 
 
 def plot_projected_distributions(q_obs_list, labels=None, colors=None, bin_width=0.04,
-                                 output_file=None, title=None, kde=True):
+                                 output_file=None, title=None, kde=True,
+                                 precomputed_overlays=None):
     """
     Plot histograms of projected axis ratios for multiple distributions.
 
@@ -275,55 +276,71 @@ def plot_projected_distributions(q_obs_list, labels=None, colors=None, bin_width
         output_file (str): Path to save the plot (optional)
         title (str): Title for the plot
         kde (bool): Whether to plot kernel density estimate
+        precomputed_overlays (list): List of dicts for pre-binned data overlays.
+            Each dict should have:
+                'x_centers' (array-like): Bin centre x-values
+                'y_values'  (array-like): Density y-values
+                'label'     (str):        Legend label
+                'color'     (str):        Line/step colour
+                'style'     (str):        'step' for a step histogram, 'line' for a plain line
+                'bin_width' (float):      Bin width of the pre-binned data (default 0.1)
+                'linewidth' (float):      Line width (default 2)
 
     Returns:
         figure: Histogram plot figure
     """
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    # Set default colors if not provided
+    if title is not None:
+        fig.suptitle(title)
+
     if colors is None:
         colors = plt.cm.tab10.colors[:len(q_obs_list)]
 
-    # Set default labels if not provided
     if labels is None:
         labels = [f"Distribution {i + 1}" for i in range(len(q_obs_list))]
 
-    # Calculate bin edges
     bins = np.arange(0, 1.01, bin_width)
 
-    # Plot histogram for each distribution
     for i, (q_obs, label, color) in enumerate(zip(q_obs_list, labels, colors)):
-        ax.hist(q_obs, bins=bins, alpha=0.6, color=color, label=label, density=True, histtype='step', linewidth=2)
+        ax.hist(q_obs, bins=bins, alpha=1, color=color, label=label,
+                density=True, histtype='step', linewidth=2)
 
-        # Add kernel density estimate
-        if kde and len(q_obs) > 100:  # Only add KDE if enough points
+        if kde and len(q_obs) > 100:
             x_grid = np.linspace(0, 1, 500)
             kde_obj = gaussian_kde(q_obs)
             y_kde = kde_obj(x_grid)
             ax.plot(x_grid, y_kde, color=color, linestyle='-', linewidth=2)
 
-    # Set labels and title
+    # --- Pre-binned overlays (e.g. data digitised from an existing plot) ---
+    if precomputed_overlays:
+        for overlay in precomputed_overlays:
+            x   = np.array(overlay['x_centers'])
+            y   = np.array(overlay['y_values'])
+            bw  = overlay.get('bin_width', 0.1)
+            lw  = overlay.get('linewidth', 2)
+            col = overlay['color']
+            lbl = overlay['label']
+
+            if overlay.get('style') == 'step':
+                # Reconstruct bin edges from centres, then use stairs for a clean step look
+                edges = np.append(x - bw / 2, x[-1] + bw / 2)
+                ax.stairs(y, edges, color=col, linewidth=lw, label=lbl, fill=False)
+            else:
+                ax.plot(x, y, color=col, linewidth=lw, label=lbl, linestyle='-')
+                ax.scatter(x, y, color=col, s=50, edgecolor='k', linewidth=1, label=None)
+
     ax.set_xlabel('Projected Axis Ratio (q = b/a)', fontsize=28)
     ax.set_ylabel('Density', fontsize=28)
-
-    # if title:
-    #     ax.set_title(title, fontsize=16)
-
-    # Add legend
-    ax.legend(fontsize=20)
-
-    # Add grid
+    ax.legend(fontsize=15)
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
 
-    # Save if output_file is provided
     if output_file:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
     return fig
-
 
 
 
@@ -375,7 +392,7 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None, 
 
         # Plot observed data
         ax.hist(q_obs, bins=bins, alpha=1, color=color, label=f"{label} (Observed)",
-                density=True, histtype='step', linewidth=2.5)
+                density=True, histtype='step', linewidth=2.5, linestyle='--')
 
         # Add kernel density estimate for observed data
         if kde and len(q_obs) > 100:

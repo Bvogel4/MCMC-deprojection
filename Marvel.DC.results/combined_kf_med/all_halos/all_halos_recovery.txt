@@ -24,35 +24,35 @@ DISTRIBUTION COMPARISON TESTS
 1. Observed vs Model Distribution
 --------------------------------------------------------------------------------
   Kolmogorov-Smirnov Test:
-    Statistic: 0.151733
+    Statistic: 0.153852
     p-value:   0.000000
     → Reject null (p ≤ 0.05): distributions are different
-  Earth Mover's Distance: 0.037282
+  Earth Mover's Distance: 0.036142
 
 2. Observed vs True Distribution
 --------------------------------------------------------------------------------
   Kolmogorov-Smirnov Test:
-    Statistic: 0.315343
+    Statistic: 0.311667
     p-value:   0.000000
     → Reject null (p ≤ 0.05): distributions are different
-  Earth Mover's Distance: 0.107740
+  Earth Mover's Distance: 0.106946
 
 3. Model vs True Distribution
 --------------------------------------------------------------------------------
   Kolmogorov-Smirnov Test:
-    Statistic: 0.223200
+    Statistic: 0.217500
     p-value:   0.000000
     → Reject null (p ≤ 0.05): distributions are different
-  Earth Mover's Distance: 0.076087
+  Earth Mover's Distance: 0.076075
 
 Summary of Distribution Comparisons:
 --------------------------------------------------------------------------------
   Comparison                KS Stat      KS p-value   EMD         
   ------------------------- ------------ ------------ ------------
-  Observed vs Model         0.151733     0.000000     0.037282    
-  Observed vs True          0.315343     0.000000     0.107740    
-  Model vs True             0.223200     0.000000     0.076087    
+  Observed vs Model         0.153852     0.000000     0.036142    
+  Observed vs True          0.311667     0.000000     0.106946    
+  Model vs True             0.217500     0.000000     0.076075    
 
 Interpretation:
-  ✓ Model is closer to truth than observations (EMD: 0.076087 < 0.107740)
+  ✓ Model is closer to truth than observations (EMD: 0.076075 < 0.106946)
   ✗ Model differs significantly from observed data (KS p = 0.0000)

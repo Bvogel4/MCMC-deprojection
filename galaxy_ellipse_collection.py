@@ -1,4 +1,4 @@
-#this contains a bunch of helperfunction for MCMC_sims to run and plot MCMC codes from shape_inference and shape_plotting. 
+#this contains a bunch of helper functions for MCMC_sims to run and plot MCMC codes from shape_inference and shape_plotting.
 
 import os
 import matplotlib.pyplot as plt
@@ -8,6 +8,9 @@ import numpy as np
 import pickle
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator, Rbf
 from matplotlib.colors import is_color_like
+from joblib import Memory
+
+memory = Memory(location='.cache/interpolators', verbose=0)
 
 from shape_inference import (
     generate_projections,
@@ -29,227 +32,162 @@ from shape_plotting import (
 )
 
 
-def interpolate_orientations(halo_ellipses, reff_multipliers=[2, 3, 4],
-                             interpolation_method='linear', coordinate_system='angles'):
-    """
-    Function that interpolates ellipticity values for arbitrary viewing angles.
-    Handles periodic boundary conditions.
-    """
-
-    # Function to extract angles from orientation string
+@memory.cache
+def _build_interpolators_cached(sim_name, halo_id, halo_data, reff_multipliers,
+                                 interpolation_method, coordinate_system):
     def parse_orientation(orientation):
         try:
-            x_angle = int(orientation[1:4])  # Rotation around x-axis in degrees
-            y_angle = int(orientation[5:8])  # Rotation around y-axis in degrees
+            x_angle = int(orientation[1:4])
+            y_angle = int(orientation[5:8])
             return x_angle, y_angle
         except (ValueError, IndexError):
             print(f"Invalid orientation format: {orientation}")
             return None, None
 
-    # Function to convert angles to 3D unit vector if using vector coordinates
-    def angles_to_vector(x_angle, y_angle):
-        x_rad = np.radians(x_angle)
-        y_rad = np.radians(y_angle)
-
-        # Start with vector pointing along z-axis (0, 0, -1)
-        # Rotate around y-axis (affects x and z)
-        vx = np.sin(y_rad)
-        vy = 0
-        vz = -np.cos(y_rad)
-
-        # Rotate around x-axis (affects y and z)
-        new_vy = vy * np.cos(x_rad) - vz * np.sin(x_rad)
-        new_vz = vy * np.sin(x_rad) + vz * np.cos(x_rad)
-
-        return [vx, new_vy, new_vz]
-
-    # Prepare data points and values with periodic boundary handling
     original_points = []
-    extended_points = []  # Will include periodic boundary points
     original_values = {i: [] for i in range(len(reff_multipliers))}
-    extended_values = {i: [] for i in range(len(reff_multipliers))}
 
-    # First collect all original data points
-    for orientation, ellipticities in halo_ellipses.items():
-        # Skip non-orientation keys
+    for orientation, ellipticities in halo_data.items():  # ← was halo_ellipses
         if not (orientation.startswith('x') and 'y' in orientation):
             continue
-
-        x_angle, y_angle = parse_orientation(orientation)
-        point = [x_angle, y_angle]
-
-        original_points.append(point)
-
-        # Store original ellipticity values
+        x_angle, y_angle = parse_orientation(orientation)  # ← now defined above
+        original_points.append([x_angle, y_angle])
         for i, eps in enumerate(ellipticities):
             if i < len(reff_multipliers):
                 original_values[i].append(float(eps))
-                
-    print(f"Original points count: {len(original_points)}")
 
-    for i in range(len(reff_multipliers)):
-        vals = original_values[i]
-        nan_count = sum(1 for v in vals if np.isnan(v))
-        print(f"reff_index {i} (mult={reff_multipliers[i]}): {len(vals)} values, {nan_count} NaNs")
-
-    # Now create extended dataset with periodic boundaries
     extended_points = original_points.copy()
-    for i in range(len(reff_multipliers)):
-        extended_values[i] = original_values[i].copy()
+    extended_values = {i: original_values[i].copy() for i in range(len(reff_multipliers))}
 
-    # Handle periodicity by adding mirrored points
     if coordinate_system == 'angles':
         for idx, point in enumerate(original_points):
             x_angle, y_angle = point
-
-            # Add points for x-periodicity (0° = 180°)
             if x_angle == 0:
-                new_point = [180, y_angle]
-                extended_points.append(new_point)
+                extended_points.append([180, y_angle])
                 for i in range(len(reff_multipliers)):
                     extended_values[i].append(original_values[i][idx])
             elif x_angle == 180:
-                new_point = [0, y_angle]
-                extended_points.append(new_point)
+                extended_points.append([0, y_angle])
                 for i in range(len(reff_multipliers)):
                     extended_values[i].append(original_values[i][idx])
-
-            # Add points for y-periodicity (0° = 360°)
             if y_angle == 0:
-                new_point = [x_angle, 360]
-                extended_points.append(new_point)
+                extended_points.append([x_angle, 360])
                 for i in range(len(reff_multipliers)):
                     extended_values[i].append(original_values[i][idx])
-            elif y_angle == 360 or y_angle == 359:
-                new_point = [x_angle, 0]
-                extended_points.append(new_point)
+            elif y_angle in (360, 359):
+                extended_points.append([x_angle, 0])
                 for i in range(len(reff_multipliers)):
                     extended_values[i].append(original_values[i][idx])
-
-            # Add points for corner cases
             if (x_angle == 0 and y_angle == 0):
-                new_point = [180, 360]
-                extended_points.append(new_point)
+                extended_points.append([180, 360])
                 for i in range(len(reff_multipliers)):
                     extended_values[i].append(original_values[i][idx])
             elif (x_angle == 180 and y_angle == 0):
-                new_point = [0, 360]
-                extended_points.append(new_point)
+                extended_points.append([0, 360])
                 for i in range(len(reff_multipliers)):
                     extended_values[i].append(original_values[i][idx])
-            elif (x_angle == 0 and (y_angle == 360 or y_angle == 359)):
-                new_point = [180, 0]
-                extended_points.append(new_point)
+            elif (x_angle == 0 and y_angle in (360, 359)):
+                extended_points.append([180, 0])
                 for i in range(len(reff_multipliers)):
                     extended_values[i].append(original_values[i][idx])
-            elif (x_angle == 180 and (y_angle == 360 or y_angle == 359)):
-                new_point = [0, 0]
-                extended_points.append(new_point)
+            elif (x_angle == 180 and y_angle in (360, 359)):
+                extended_points.append([0, 0])
                 for i in range(len(reff_multipliers)):
                     extended_values[i].append(original_values[i][idx])
 
-    # filter out nan data points:
-    # Filter out NaN values before creating interpolators
-
-    extended_points_filtered = {}  # ← Change to dict
+    extended_points_filtered = {}
     for i in range(len(reff_multipliers)):
-        if len(extended_values[i]) == 0:
+        if not extended_values[i]:
             continue
-
         points_array = np.array(extended_points)
         values_array = np.array(extended_values[i])
-
         valid_mask = ~np.isnan(values_array)
-
         points_array = points_array[valid_mask]
         values_array = values_array[valid_mask]
-
-        # Only store if there's valid data after filtering
         if len(values_array) > 0:
-            extended_points_filtered[i] = points_array  # ← Use dict with index as key
+            extended_points_filtered[i] = points_array
             extended_values[i] = values_array
         else:
-            extended_values[i] = []  # Mark as empty
-    for i in range(len(reff_multipliers)):
-        print(f"After filtering reff_index {i}: {len(extended_values[i])} valid values")
-    # Create interpolators
-    for i in range(len(reff_multipliers)):
-        if i not in extended_points_filtered or len(extended_values[i]) == 0:
-            continue
+            extended_values[i] = []
 
-        points_array = extended_points_filtered[i]
-        values_array = np.array(extended_values[i])
-
-    # Create interpolators based on selected method using filtered dataset
     interpolators = {}
     fallback_interpolators = {}
 
     for i in range(len(reff_multipliers)):
         if i not in extended_points_filtered or len(extended_values[i]) == 0:
             continue
-
-        points_array = extended_points_filtered[i]  # ← Now correctly keyed
+        points_array = extended_points_filtered[i]
         values_array = np.array(extended_values[i])
-        #assert lengths are the same
-        assert len(points_array) == len(values_array), f'length of points, is not the same as values for interpolation: {len(points_array)} != {len(values_array)}'
-        #need to fix this, each reff index needs its own points array, Should be fixed? need to check. 
-
+        assert len(points_array) == len(values_array)
 
         if interpolation_method == 'rbf':
             if coordinate_system == 'vectors':
-                interpolators[i] = Rbf(
-                    points_array[:, 0], points_array[:, 1], points_array[:, 2],
-                    values_array, function='multiquadric'
-                )
+                interpolators[i] = Rbf(points_array[:, 0], points_array[:, 1],
+                                       points_array[:, 2], values_array, function='multiquadric')
             else:
-                interpolators[i] = Rbf(
-                    points_array[:, 0], points_array[:, 1],
-                    values_array, function='multiquadric'
-                )
+                interpolators[i] = Rbf(points_array[:, 0], points_array[:, 1],
+                                       values_array, function='multiquadric')
         elif interpolation_method == 'nearest':
             interpolators[i] = NearestNDInterpolator(points_array, values_array)
-        else:  # 'linear' is default
+        else:
             interpolators[i] = LinearNDInterpolator(points_array, values_array)
             fallback_interpolators[i] = NearestNDInterpolator(points_array, values_array)
 
-    # Define the interpolation function with periodic boundary handling
-    def interpolate(x_angle, y_angle, reff_index=0):
-        """
-        Estimate ellipticity at arbitrary viewing angles with periodic boundaries.
-        """
-        # Normalize angles to the periodic domain
+    return interpolators, fallback_interpolators, list(reff_multipliers)
+
+
+class HaloInterpolator:
+    def __init__(self, sim_name, halo_id, halo_data, reff_multipliers,
+                 interpolation_method='linear', coordinate_system='angles'):
+        self._interpolators, self._fallback_interpolators, self.reff_multipliers = \
+            _build_interpolators_cached(
+                sim_name, halo_id, halo_data,
+                tuple(reff_multipliers), interpolation_method, coordinate_system
+            )
+        self.interpolation_method = interpolation_method
+        self.coordinate_system = coordinate_system
+
+    @staticmethod
+    def angles_to_vector(x_angle, y_angle):
+        x_rad = np.radians(x_angle)
+        y_rad = np.radians(y_angle)
+        vx = np.sin(y_rad)
+        vy = 0
+        vz = -np.cos(y_rad)
+        new_vy = vy * np.cos(x_rad) - vz * np.sin(x_rad)
+        new_vz = vy * np.sin(x_rad) + vz * np.cos(x_rad)
+        return [vx, new_vy, new_vz]
+
+    def __call__(self, x_angle, y_angle, reff_index=0):
         if x_angle > 180:
             x_angle = x_angle % 180
         if y_angle > 360:
             y_angle = y_angle % 360
 
-        if reff_index not in interpolators:
-            #show what reff_index was requested and what multipliers are available
-            #print(f"Available reff_multipliers: {reff_multipliers}")
-            raise ValueError(f"No data for reff_index {reff_index} (multiplier={reff_multipliers[reff_index]})")
+        if reff_index not in self._interpolators:  # ← self.
+            raise ValueError(f"No data for reff_index {reff_index} "
+                             f"(multiplier={self.reff_multipliers[reff_index]})")
 
-        # Interpolate based on selected method and coordinate system
-        if interpolation_method == 'rbf':
-            if coordinate_system == 'vectors':
-                vx, vy, vz = angles_to_vector(x_angle, y_angle)
-                return float(interpolators[reff_index](vx, vy, vz))
+        if self.interpolation_method == 'rbf':  # ← self.
+            if self.coordinate_system == 'vectors':  # ← self.
+                vx, vy, vz = self.angles_to_vector(x_angle, y_angle)  # ← self.
+                return float(self._interpolators[reff_index](vx, vy, vz))  # ← self.
             else:
-                return float(interpolators[reff_index](x_angle, y_angle))
+                return float(self._interpolators[reff_index](x_angle, y_angle))  # ← self.
         else:
-            if coordinate_system == 'vectors':
-                point = angles_to_vector(x_angle, y_angle)
+            if self.coordinate_system == 'vectors':  # ← self.
+                point = self.angles_to_vector(x_angle, y_angle)  # ← self.
             else:
                 point = [x_angle, y_angle]
 
-            result = interpolators[reff_index](point)
+            result = self._interpolators[reff_index](point)  # ← self.
 
-            # For linear interpolation, use fallback if out of convex hull
-            if interpolation_method == 'linear' and np.isnan(result):
-                result = fallback_interpolators[reff_index](point)
+            if self.interpolation_method == 'linear' and np.isnan(result):  # ← self.
+                result = self._fallback_interpolators[reff_index](point)  # ← self.
 
             return float(result)
 
-    return interpolate, reff_multipliers
+
 
 
 def inverse_transform_intrinsic(theta, phi):
@@ -619,33 +557,28 @@ class GalaxyEllipseCollection:
         self.interpolators = {}  # Dictionary to store interpolation functions
         self.reff_multipliers = {}  # Dictionary to store effective radius multipliers
         self.n_steps = 30000
+        self.halo_data = {}  # Store raw halo data for reference
 
     def add_halo(self, sim_name, halo_id, halo_data, reff_multipliers=None,
                  interpolation_method='linear', coordinate_system='angles'):
-        """
-        Add a halo to the collection with its data and create interpolator.
-
-        Parameters:
-            sim_name (str): Simulation name
-            halo_id (int/str): Halo identifier
-            halo_data (dict): Dictionary containing ellipse data
-            reff_multipliers (list): List of effective radius multipliers
-            interpolation_method (str): Method for interpolation
-            coordinate_system (str): Coordinate system for interpolation
-        """
         halo_key = (sim_name, halo_id)
+        self.halo_data[halo_key] = halo_data  # Store raw data for reference
         self.halos[halo_key] = halo_data
 
-        # Create interpolation function
-        interpolate_func, reff_mults = interpolate_orientations(
-            halo_data,
-            reff_multipliers=reff_multipliers,
-            interpolation_method=interpolation_method,
-            coordinate_system=coordinate_system
+        interpolator = HaloInterpolator(
+            sim_name, halo_id, halo_data,
+            reff_multipliers, interpolation_method, coordinate_system
         )
+        self.interpolators[halo_key] = interpolator
+        self.reff_multipliers[halo_key] = interpolator.reff_multipliers
 
-        self.interpolators[halo_key] = interpolate_func
-        self.reff_multipliers[halo_key] = reff_mults
+    def copy_halo_from(self, other_collection, sim_name, halo_id):
+        """Copy a halo and its prebuilt interpolator from another collection."""
+        halo_key = (sim_name, halo_id)
+        self.halos[halo_key] = other_collection.halos[halo_key]
+        self.interpolators[halo_key] = other_collection.interpolators[halo_key]
+        self.reff_multipliers[halo_key] = other_collection.reff_multipliers[halo_key]
+        self.halo_data[halo_key] = other_collection.halos[halo_key]
 
     def generate_q_distribution_single_halo(self, sim_name, halo_id, n_angles, reff_index=0):
         """
@@ -718,9 +651,47 @@ class GalaxyEllipseCollection:
                 #count number of successful and failed halos
 
         print(f'Generated q values from {i} halos, failed for {j} halos.')
-
-
         
+        return np.array(q_values)
+
+    def generate_q_distribution_all_halos_sideon(self, reff_index=0):
+        """
+        Generate q distribution from all halos using random viewing angles.
+
+        Parameters:
+            n_total_angles (int): Total number of random viewing angles across all halos
+            reff_index (int): Index into reff_multipliers to use
+            weighted (bool): If True, sample each halo with equal probability
+                            If False, allocate angles proportionally to number of halos
+
+        Returns:
+            array: q values (axis ratios) from all halos
+        """
+        if not self.halos:
+            raise ValueError("No halos in collection")
+
+        q_values = []
+
+        i = 0
+        j = 0
+        for halo_key in self.halos.keys():
+            interpolator = self.interpolators[halo_key]
+
+            # Generate random viewing angles for this halo
+            x_angles, y_angles = [0],[90] #side-on view
+            # Get q values for each angle
+            try:
+                e = np.array([interpolator(x, y, reff_index) for x, y in zip(x_angles, y_angles)])
+                q = 1 - e
+                q_values.extend(q)
+                i = i + 1
+            except Exception as ex:
+                print(f"Error generating q values for halo {halo_key}: {ex}")
+                j = j + 1
+                # count number of successful and failed halos
+
+        print(f'Generated q values from {i} halos, failed for {j} halos.')
+
         return np.array(q_values)
 
     def run_inference_single_halo(self, sim_name, halo_id, n_angles, reff_index=0,
@@ -772,6 +743,7 @@ class GalaxyEllipseCollection:
 
             # Save q distribution
             np.save(full_output_dir / f"{output_prefix}_q_obs.npy", q_obs)
+
 
             # Run inference
             samples, max_prob_params, sampler = infer_intrinsic_shape(
@@ -999,17 +971,20 @@ class GalaxyEllipseCollection:
             [q_obs], [max_prob_params], [true_params],[label], [color],
             q_model=q_model, q_true=q_true,
             output_file=os.path.join(output_dir, f"{output_prefix}_projections_comparison.png"),
-            title=f"Projected Axis Ratios: Observed vs Model for {label}"
+            title=f"Projected Axis Ratios: Observed vs Model for {label}",
+            bin_width=0.1,
         )
         plt.close(fig_hist)
 
-        # Also create the original histogram (observed only) for comparison
+
         fig_hist_obs = plot_projected_distributions(
             [q_obs], [label], [color],
             output_file=os.path.join(output_dir, f"{output_prefix}_projections_hist.png"),
-            title=f"Projected Axis Ratios for {label}"
+            title=f"Projected Axis Ratios for {label}",
+            bin_width=0.1, kde=False,
         )
         plt.close(fig_hist_obs)
+
 
         # Plot corner plot
         fig_corner = plot_corner(
