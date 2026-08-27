@@ -2,7 +2,7 @@
 db_connection = '/home/bk639/data_base/BW-SB_comparison.db'
 #system path for mytangosproperties.py
 sys_path = '/home/bk639/mytangosproperty'
-pickle_file = 'ellipse_data_v_stars_BW-SB.pickle'
+pickle_file = 'ellipse_data_SBBW_v_stars_Klein.pickle'
 ba_s_key = 'ba_s'
 ca_s_key = 'ca_s'
 

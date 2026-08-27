@@ -16,7 +16,7 @@ import numpy as np
 
 
 # Set environment variables
-from BWSB_config import db_connection, sys_path, pickle_file, ba_s_key, ca_s_key, results_output_directory
+from config import db_connection, sys_path, pickle_file, ba_s_key, ca_s_key, results_output_directory
 os.environ['TANGOS_DB_CONNECTION'] = db_connection
 os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
 sys.path.append(sys_path)
@@ -119,7 +119,7 @@ def plot_isophotes_testing(images, isophote_params, orientations, reffs, rhalf, 
         ellipses = np.ones(3) * np.nan
 
         # Process isophotes at different radii (2, 3, 4) * reff
-        for k_idx, k in enumerate([2, 3, 4]):
+        for k_idx, k in enumerate([2,2.5, 3]):
             target_radius = k * reff_px
             target_min = target_radius - sma_tolerance
             target_max = target_radius  + sma_tolerance
@@ -432,7 +432,7 @@ for sim in sims:
         timestep = sim.timesteps[-1]
     elif len(sim.timesteps) == 1:
         timestep = sim.timesteps[0]
-    halos = timestep.halos[:100]
+    halos = timestep.halos[:50]
 
     #for Massive merians, only process largest halo
     if sim_name.startswith('r') and not sim_name.startswith('rogue'):
@@ -462,7 +462,7 @@ for sim in sims:
                 continue
                 
             #print(halo['n_star'][0])
-            if halo.calculate('NStar()') < 4000:
+            if halo.calculate('NStar()') < 5000:
                 continue
             
             print(f'Processing halo {hid} with {halo.calculate('NStar()')} stars')
@@ -484,7 +484,7 @@ for sim in sims:
 
             reffs = np.array(image_reffs)
             #print(np.min(reffs),np.max(reffs),np.mean(reffs),np.std(reffs))
-            filename = (results_output_directory +'/' + str(sim.basename) +'.'+ str(hid)+ '.isophotes.png')
+            filename = (results_output_directory +'/figures/' + str(sim.basename) +'.'+ str(hid)+ '.isophotes.png')
 
             halo_dict = plot_isophotes(halo_images, isophote_params, image_orientations, reffs, Rhalf, filename)
             #save to folder figures

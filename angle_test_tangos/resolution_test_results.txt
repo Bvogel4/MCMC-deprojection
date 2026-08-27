@@ -1,0 +1,64 @@
+Resolution timing / accuracy test (3 orientations, warm-up discarded)
+orientation 0 = warm-up (dropped); reported: face-on (theta=0), side-on (theta=pi/2)
+halo_id=1  base_resolution=1000px  overwrite=True
+
+--- One-time setup per resolution (paid ONCE for all orientations) ---
+  factor  res(px)  img_setup  iso_setup
+     0.5      500     13.481      0.003
+    0.75      750      8.244      0.005
+       1     1000      8.317      0.005
+     1.5     1500      8.232      0.010
+
+--- Per-orientation IMAGE creation time (s) ---
+  factor  res(px)    face_on    side_on
+     0.5      500     11.444     12.169
+    0.75      750     11.494     11.519
+       1     1000     11.504     11.517
+     1.5     1500     12.443     11.448
+
+--- Per-orientation ISOPHOTE fit time (s) ---
+  factor  res(px)    face_on    side_on
+     0.5      500     79.047     11.984
+    0.75      750    116.973     14.710
+       1     1000    159.863     22.746
+     1.5     1500    217.972     52.765
+
+--- Per-orientation MARGINAL total, image+fit (s) ---
+  factor  res(px)    face_on    side_on
+     0.5      500     90.492     24.153
+    0.75      750    128.467     26.229
+       1     1000    171.367     34.263
+     1.5     1500    230.415     64.213
+
+--- face-on ellipticity (eps at 2, 3, 4 x Reff) ---
+  factor  res(px)  eps@2Reff  eps@3Reff  eps@4Reff
+     0.5      500     0.1781     0.0996     0.0996
+    0.75      750     0.1567     0.0999     0.0999
+       1     1000     0.1701     0.1000     0.1000
+     1.5     1500     0.1670     0.1332     0.1576
+--- face-on eps difference vs 1x reference ---
+  factor    d_eps@2    d_eps@3    d_eps@4
+     0.5     0.0080    -0.0004    -0.0004
+    0.75    -0.0135    -0.0001    -0.0001
+       1     0.0000     0.0000     0.0000
+     1.5    -0.0032     0.0332     0.0576
+
+--- side-on ellipticity (eps at 2, 3, 4 x Reff) ---
+  factor  res(px)  eps@2Reff  eps@3Reff  eps@4Reff
+     0.5      500     0.8731     0.8850     0.8631
+    0.75      750     0.8766     0.8857     0.8601
+       1     1000     0.8729     0.8855     0.8586
+     1.5     1500     0.8729     0.8854     0.8591
+--- side-on eps difference vs 1x reference ---
+  factor    d_eps@2    d_eps@3    d_eps@4
+     0.5     0.0002    -0.0004     0.0046
+    0.75     0.0037     0.0002     0.0015
+       1     0.0000     0.0000     0.0000
+     1.5     0.0000    -0.0001     0.0006
+
+--- Rough estimate for 100 orientations (img_setup + 100 x mean marginal) ---
+  factor  res(px)   est_total(s)   est_total(min)
+     0.5      500         5745.7            95.76
+    0.75      750         7743.0           129.05
+       1     1000        10289.8           171.50
+     1.5     1500        14739.7           245.66

@@ -1,0 +1,58 @@
+
+================================================================================
+PARAMETER RECOVERY ASSESSMENT (Maximum Probability Estimates)
+================================================================================
+Parameter  True       Estimated    Bias            Frac Bias   
+--------------------------------------------------------------------------------
+μ_B        0.7770     0.9646       +0.1875         +24.1%
+μ_C        0.4559     0.3818       -0.0741         -16.2%
+σ_B        0.1311     0.1502       +0.0191         +14.6%
+σ_C        0.1605     0.1400       -0.0205         -12.8%
+--------------------------------------------------------------------------------
+
+Summary:
+  Mean absolute error: 0.0753
+  Mean |fractional bias|: 16.9%
+
+Interpretation:
+  ~ Moderate recovery: 10-20% average bias
+
+================================================================================
+DISTRIBUTION COMPARISON TESTS
+================================================================================
+
+1. Observed vs Model Distribution
+--------------------------------------------------------------------------------
+  Kolmogorov-Smirnov Test:
+    Statistic: 0.013571
+    p-value:   0.680924
+    → Cannot reject null (p > 0.05): distributions are similar
+  Earth Mover's Distance: 0.004403
+
+2. Observed vs True Distribution
+--------------------------------------------------------------------------------
+  Kolmogorov-Smirnov Test:
+    Statistic: 0.071071
+    p-value:   0.000000
+    → Reject null (p ≤ 0.05): distributions are different
+  Earth Mover's Distance: 0.027178
+
+3. Model vs True Distribution
+--------------------------------------------------------------------------------
+  Kolmogorov-Smirnov Test:
+    Statistic: 0.068393
+    p-value:   0.000000
+    → Reject null (p ≤ 0.05): distributions are different
+  Earth Mover's Distance: 0.027031
+
+Summary of Distribution Comparisons:
+--------------------------------------------------------------------------------
+  Comparison                KS Stat      KS p-value   EMD         
+  ------------------------- ------------ ------------ ------------
+  Observed vs Model         0.013571     0.680924     0.004403    
+  Observed vs True          0.071071     0.000000     0.027178    
+  Model vs True             0.068393     0.000000     0.027031    
+
+Interpretation:
+  ✓ Model is closer to truth than observations (EMD: 0.027031 < 0.027178)
+  ✓ Model adequately represents observed data (KS p = 0.6809)

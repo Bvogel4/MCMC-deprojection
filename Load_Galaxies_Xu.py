@@ -33,15 +33,16 @@ warnings.filterwarnings("ignore")
 # ===========================
 
 import sys
-from config import db_connection, sys_path, xu_output_dir
+from config import db_connection, sys_path, xu_output_dir, pickle_file
 
-os.environ['TANGOS_DB_CONNECTION'] = db_connection
+os.environ['TANGOS_DB_CONNECTION'] =  '/home/bk639/data_base/CDM_all_shapes.db'#db_connection
 os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
 sys.path.append(sys_path)
 import tangos
 
 import mytangosproperty
-from galaxy_ellipse_collection import random_viewing_angles, interpolate_orientations
+from galaxy_ellipse_collection import random_viewing_angles, SphereInterpolator, get_keys
+from MCMC_sims import smooth_shape
 
 # Physical constants
 MASS_TO_LIGHT_THRESHOLD = 85  # M_sun/L_sun threshold for bright/dim classification
@@ -56,7 +57,8 @@ if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
 # Progress file paths
-PROGRESS_FILE = os.path.join(OUTPUT_DIR, 'galaxy_data_progress.pkl')
+PROGRESS_FILE = os.path.join('caches', 'galaxy_data_progress.pkl')
+print(PROGRESS_FILE)
 
 
 # ===========================
@@ -286,8 +288,14 @@ def load_galaxy_data() -> List[GalaxyData]:
         sim_name = str(sim.basename)
         print(f"\nProcessing simulation {sim_name}")
 
-        # Get the latest timestep
-        timestep = sim.timesteps[-1] if len(sim.timesteps) > 1 else sim.timesteps[0]
+        if len(sim.timesteps)==0:
+            print(f'No timesteps available for {sim_name}')
+            continue
+        elif len(sim.timesteps) > 1:
+            timestep = sim.timesteps[-1]
+        else:
+            timestep = sim.timesteps[0]
+
         halos = timestep.halos[:20]  # Limit for testing
 
         for halo in halos:
@@ -348,14 +356,14 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
     # Basic setup
     sim_name = str(sim.basename)
     halo_id = str(halo.halo_number)
-    halo_ref = f'{sim_name}/%/{halo.basename}'
+    halo_ref = f'{sim.basename}/%/{halo.basename}'
 
     # Check star particle count
     if 'n_star' in halo.keys() and halo['n_star'][0] < MIN_STAR_PARTICLES:
         return None
 
     # Load ellipse data
-    halo_ellipse_data = gec.load_and_process_halo_data(sim.basename, halo_ref)
+    halo_data = gec.load_and_process_halo_data(sim.basename, halo_ref,pickle_filename=pickle_file)
 
     # Extract masses
     if 'finder_star_mass' in halo:
@@ -369,23 +377,77 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
 
     dynamical_mass = extract_single_value(halo.get('Mdyn', np.nan))
 
+
+
     # Get half-light radius
-    half_light_radius = halo.get('Rhalf_v', np.nan)
-    reff = halo.get('image_reffs_v',np.nan)[0]
+    #half_light_radius = halo.get('Rhalf_v', np.nan)
 
+    # reff = halo.get('image_reffs_v',np.nan)[0]
+
+    Reff,v_lum,half_light_radius = get_keys(sim.basename, halo_id,(0,0), ['Reff','V_lum_den','Rhalf'])
+    profile_rbins,mags_v = get_keys(sim.basename, halo_id,(0,0), ['rbins','mags_V'])
+    try:
+        a = halo['a_s']
+        b = halo['b_s']
+        c = halo['c_s']
+        rbins_s = halo['rbins_s']
+    except Exception:
+        print(f'no shape found for {sim} {halo}')
+        return None
+
+    rbins_f, a_f, b_f, c_f, a_s_func, b_s_func, c_s_func = smooth_shape(rbins_s, a, b, c, k=3)
+    # get a,b,c at 2*reff
+    a_s = a_s_func(2 * Reff)
+    b_s = b_s_func(2 * Reff)
+    c_s = c_s_func(2 * Reff)
+    ba_s = b_s / a_s
+    ca_s = c_s / a_s
+
+    #halo_data = gec.load_and_process_halo_data(pickle_file, sim, halo_ref)
+    ellipticity_interpolator = SphereInterpolator(halo_data)
+    sb_dict = {}
+
+    thetas, phis = gec.extract_floats(list(halo_data.keys()))
+    thetas = np.asarray(thetas)
+    phis = np.asarray(phis)
+    orientations = list(halo_data.keys())
+    for orientation,theta,phi in zip(orientations,thetas,phis):
+        mag,area = get_keys(sim.basename, halo_id, (theta,phi),['mags_V','binarea'])
+        mag0 = mag[0]
+        area0 = area[0]
+        sigma0 = (10 ** (0.4 * (4.8 - mag0))) / area0   # normalize to total lum
+        sb_dict[orientation] = [sigma0]
+    sb_interpolator = SphereInterpolator(sb_dict)
+
+    # mags = halo['profile_mags_v'][0]
+    # rbins = halo['profile_rbins_v'][0]
+    # reff = halo['image_reffs_v'][0]
+
+
+
+    # Find index closest to effective radius
+    ind_eff = np.argmin(np.abs(Reff - profile_rbins))
+
+    # Calculate luminosity within effective radius
+    luminosities = 10 ** (0.4 * (4.8 - mags_v))
+    lum_eff = np.sum(luminosities[:ind_eff + 1])
+
+    #return
+    mass_to_light = dynamical_mass / lum_eff
     # Calculate mass-to-light ratio (using face-on orientation)
-    mass_to_light = calculate_mass_to_light_ratio(halo, dynamical_mass)
+    # mass_to_light = calculate_mass_to_light_ratio(halo, dynamical_mass)
 
-    # Create interpolation functions for ellipticity and surface brightness
-    ellipticity_interpolator, sb_interpolator = create_interpolators(
-        halo, halo_ellipse_data
-    )
+    # # Create interpolation functions for ellipticity and surface brightness
+    # ellipticity_interpolator, sb_interpolator = create_interpolators(
+    #     halo, halo_ellipse_data
+    # )
 
-    total_lum = SB_integrated(halo['profile_rbins_v'][0], halo['profile_v_lum_den'][0])
+    #total_lum = SB_integrated(halo['profile_rbins_v'][0], halo['profile_v_lum_den'][0])
+    total_lum = SB_integrated(profile_rbins, v_lum)
 
     # Get 3D shape functions
-    shape_b_over_a = halo.calculate('ba_s_smoothed()')
-    shape_c_over_a = halo.calculate('ca_s_smoothed()')
+    # shape_b_over_a = halo.calculate('ba_s_smoothed()')
+    # shape_c_over_a = halo.calculate('ca_s_smoothed()')
 
     # Determine environment (will be updated later from external file)
     environment = 'unknown'
@@ -402,9 +464,9 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
         environment=environment,
         ellipticity_interpolator=ellipticity_interpolator,
         surface_brightness_interpolator=sb_interpolator,
-        shape_b_over_a=shape_b_over_a,
-        shape_c_over_a=shape_c_over_a,
-        reff=reff
+        shape_b_over_a=ba_s,
+        shape_c_over_a=ca_s,
+        reff=Reff
     )
 
     return galaxy_data
@@ -413,13 +475,14 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
 def calculate_mass_to_light_ratio(halo, dynamical_mass: float) -> float:
     """Calculate M/L ratio for face-on orientation"""
 
-    if 'profile_mags_v' not in halo.keys() or 'profile_rbins_v' not in halo.keys():
-        return np.nan
+    # if 'profile_mags_v' not in halo.keys() or 'profile_rbins_v' not in halo.keys():
+    #     return np.nan
 
     # Get face-on data (index 0)
-    mags = halo['profile_mags_v'][0]
-    rbins = halo['profile_rbins_v'][0]
-    reff = halo['image_reffs_v'][0]
+    # mags = halo['profile_mags_v'][0]
+    # rbins = halo['profile_rbins_v'][0]
+    # reff = halo['image_reffs_v'][0]
+    # mags,rbins,reff = get_keys(sim_name,hid)
 
     # Find index closest to effective radius
     ind_eff = np.argmin(np.abs(reff - rbins))
@@ -431,37 +494,38 @@ def calculate_mass_to_light_ratio(halo, dynamical_mass: float) -> float:
     return dynamical_mass / lum_eff if lum_eff > 0 else np.nan
 
 
-def create_interpolators(halo, halo_ellipse_data) -> Tuple[callable, callable]:
-    """Create interpolation functions for ellipticity and surface brightness"""
-    orientations = halo['image_orientations_v']
-
-    # Create ellipticity data dict
-    ellipse_data_dict = {}
-    for i, orientation in enumerate(orientations):
-        # Use 2Reff data (index 0)
-        ellipse_data_dict[orientation] = [halo_ellipse_data[orientation][0]]
-
-    # Create surface brightness data dict
-    sb_data_dict = {}
-    # total luminosity at face-on orientation (not significantly different from any other orientation)
-
-    for i, orientation in enumerate(orientations):
-        # Calculate central surface brightness
-        if 'profile_mags_v' in halo.keys() and 'profile_binarea_v' in halo.keys():
-            mag0 = halo['profile_mags_v'][i][0]
-            area0 = halo['profile_binarea_v'][i][0]
-            sigma0 = (10 ** (0.4 * (4.8 - mag0))) / area0   # normalize to total lum
-            sb_data_dict[orientation] = [sigma0]
-
-    # Create interpolation functions
-    ellipticity_func, _ = gec.interpolate_orientations(
-        ellipse_data_dict, reff_multipliers=[2]
-    )
-    sb_func, _ = gec.interpolate_orientations(
-        sb_data_dict, reff_multipliers=[2]
-    )
-
-    return ellipticity_func, sb_func
+# def create_interpolators(halo, halo_ellipse_data) -> Tuple[callable, callable]:
+#     """Create interpolation functions for ellipticity and surface brightness"""
+#     orientations = halo['image_orientations_v']
+#
+#     # Create ellipticity data dict
+#     ellipse_data_dict = {}
+#     for i, orientation in enumerate(orientations):
+#         # Use 2Reff data (index 0)
+#         ellipse_data_dict[orientation] = [halo_ellipse_data[orientation][0]]
+#
+#     # Create surface brightness data dict
+#     sb_data_dict = {}
+#     # total luminosity at face-on orientation (not significantly different from any other orientation)
+#
+#     for i, orientation in enumerate(orientations):
+#         # Calculate central surface brightness
+#         if 'profile_mags_v' in halo.keys() and 'profile_binarea_v' in halo.keys():
+#             mag0 = halo['profile_mags_v'][i][0]
+#             area0 = halo['profile_binarea_v'][i][0]
+#             sigma0 = (10 ** (0.4 * (4.8 - mag0))) / area0   # normalize to total lum
+#             sb_data_dict[orientation] = [sigma0]
+#
+#     sim_name = halo.path.split('.')[0]
+#     # Create interpolation functions
+#     ellipticity_func, _ = gec._build_interpolators_cached(sim_name, halo.id,
+#         ellipse_data_dict, 0, 'linear', 'angles'
+#     )
+#     sb_func, _ = gec._build_interpolators_cached(sim_name, halo.id,
+#         sb_data_dict, 0,'linear', 'angles'
+#     )
+#
+#     return ellipticity_func, sb_func
 
 
 def load_environment_classifications(galaxy_list: List[GalaxyData]) -> None:
