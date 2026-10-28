@@ -36,28 +36,72 @@ import corner
 from matplotlib.patches import Ellipse
 from scipy.stats import gaussian_kde, ks_2samp
 
+import numpy as np
+from scipy.stats import norm
+from scipy.special import ndtr
+from scipy.optimize import minimize
+
 from shape_inference import (
     generate_ellipsoid_distribution,
     generate_model_projections,
-    random_viewing_angles
+    random_viewing_angles,
+    EllipsoidDistribution,
 )
 from fast_likelihood import projected_semi_axes
+
+
+
 # ---------------------------------------------------------------------------
 # KF observational data
 # ---------------------------------------------------------------------------
 KF_DATA = {
-    'KF High Mass': {
-        '1R_eff': {'center': (0.863, 0.297), 'std': (0.075, 0.103)},
-        '2R_eff': {'center': (0.91, 0.352), 'std': (0.04, 0.155)}
+    # ----- Figure 9: binned by stellar mass -----
+    'KF High Mass': {  # 10^9.0 < M* < 10^9.6 Msun
+        '1R_eff': {'params': [0.84, 0.30, 0.09, 0.11], 'errors': [0.01, 0.01, 0.01, 0.01]},
+        '2R_eff': {'params': [0.93, 0.35, 0.04, 0.15], 'errors': [0.02, 0.02, 0.02, 0.02]},
+        '3R_eff': {'params': [0.94, 0.43, 0.05, 0.14], 'errors': [0.01, 0.01, 0.01, 0.01]},
+        '4R_eff': {'params': [0.82, 0.56, 0.21, 0.19], 'errors': [0.04, 0.02, 0.02, 0.03]},
     },
-    'KF Medium Mass': {
-        '1R_eff': {'center': (0.857, 0.323), 'std': (0.05, 0.118)},
-        '2R_eff': {'center': (0.902, 0.371), 'std': (0.05, 0.163)}
+    'KF Low Mass': {  # 10^8.5 < M* < 10^9.0 Msun
+        '1R_eff': {'params': [0.75, 0.47, 0.02, 0.19], 'errors': [0.03, 0.03, 0.04, 0.02]},
+        '2R_eff': {'params': [0.79, 0.46, 0.05, 0.20], 'errors': [0.03, 0.03, 0.04, 0.05]},
+        '3R_eff': {'params': [0.81, 0.47, 0.18, 0.17], 'errors': [0.05, 0.03, 0.03, 0.03]},
+        '4R_eff': {'params': [0.80, 0.44, 0.30, 0.10], 'errors': [0.10, 0.04, 0.06, 0.05]},
     },
-    'KF Low Mass': {
-        '1R_eff': {'center': (0.753, 0.459), 'std': (0.087, 0.194)},
-        '2R_eff': {'center': (0.778, 0.446), 'std': (0.102, 0.213)}
-    }
+    'KF Medium Mass': {  # 10^7.0 < M* < 10^8.5 Msun
+        '1R_eff': {'params': [0.86, 0.32, 0.02, 0.11], 'errors': [0.02, 0.02, 0.02, 0.02]},
+        '2R_eff': {'params': [0.91, 0.38, 0.05, 0.17], 'errors': [0.03, 0.02, 0.02, 0.02]},
+        '3R_eff': {'params': [0.93, 0.41, 0.06, 0.11], 'errors': [0.06, 0.02, 0.05, 0.04]},
+        '4R_eff': {'params': [0.79, 0.50, 0.27, 0.18], 'errors': [0.07, 0.03, 0.03, 0.03]},
+    },
+
+    # ----- Figure 10: binned by color (g-i), M* > 10^8.5 Msun only -----
+    'KF Blue (g-i < 0.90)': {
+        '1R_eff': {'params': [0.84, 0.30, 0.08, 0.10], 'errors': [0.01, 0.01, 0.01, 0.01]},
+        '2R_eff': {'params': [0.90, 0.34, 0.02, 0.14], 'errors': [0.02, 0.01, 0.02, 0.02]},
+        '3R_eff': {'params': [0.94, 0.42, 0.04, 0.12], 'errors': [0.04, 0.01, 0.03, 0.02]},
+        '4R_eff': {'params': [0.77, 0.54, 0.26, 0.20], 'errors': [0.04, 0.02, 0.02, 0.02]},
+    },
+    'KF Red (g-i > 0.90)': {
+        '1R_eff': {'params': [0.93, 0.40, 0.01, 0.17], 'errors': [0.03, 0.02, 0.03, 0.03]},
+        '2R_eff': {'params': [0.89, 0.43, 0.07, 0.17], 'errors': [0.05, 0.03, 0.04, 0.04]},
+        '3R_eff': {'params': [0.96, 0.46, 0.04, 0.12], 'errors': [0.07, 0.04, 0.05, 0.06]},
+        # Note: no 4R_eff row given for this bin in the source table
+    },
+
+    # ----- Figure 11: binned by nearest-neighbor distance, M* > 10^8.5 Msun only -----
+    'KF Isolated (d_NN > 1 Mpc)': {
+        '1R_eff': {'params': [0.89, 0.29, 0.04, 0.08], 'errors': [0.01, 0.01, 0.01, 0.01]},
+        '2R_eff': {'params': [0.90, 0.35, 0.05, 0.11], 'errors': [0.02, 0.01, 0.02, 0.02]},
+        '3R_eff': {'params': [0.93, 0.39, 0.05, 0.13], 'errors': [0.03, 0.01, 0.02, 0.02]},
+        '4R_eff': {'params': [0.85, 0.48, 0.23, 0.20], 'errors': [0.05, 0.03, 0.02, 0.03]},
+    },
+    'KF Clustered (d_NN <= 1 Mpc)': {
+        '1R_eff': {'params': [0.86, 0.36, 0.04, 0.17], 'errors': [0.03, 0.02, 0.02, 0.02]},
+        '2R_eff': {'params': [0.91, 0.40, 0.06, 0.16], 'errors': [0.03, 0.02, 0.02, 0.02]},
+        '3R_eff': {'params': [0.95, 0.44, 0.04, 0.14], 'errors': [0.06, 0.03, 0.05, 0.04]},
+        '4R_eff': {'params': [0.76, 0.59, 0.25, 0.17], 'errors': [0.04, 0.04, 0.04, 0.04]},
+    },
 }
 
 KF_ELL_COLORS = {
@@ -71,9 +115,73 @@ KF_ELL_COLORS = {
 # Parameter-model bookkeeping  (the core of the 4-vs-7 generalisation)
 # ===========================================================================
 
-LABELS_4 = ["B/A", "C/A", r"$\sigma_B$", r"$\sigma_C$"]
-LABELS_7 = [r"$\mu_a$", r"$\mu_b$ (B/A)", r"$\mu_c$ (C/A)",
-            r"$\sigma_a$", r"$\sigma_b$", r"$\sigma_c$", r"$\sigma_{ac}$"]
+LABELS_4 = [r"$\mu_Q$", r"$\mu_S$", r"$\sigma_Q$", r"$\sigma_S$"]
+LABELS_7 = [r"$\mu_A$", r"$\mu_Q$", r"$\mu_S$",
+            r"$\sigma_A$", r"$\sigma_Q$", r"$\sigma_S$", r"$\sigma_{AS}$"]
+
+
+
+# Fixed quadrature nodes on (0,1). Fixed => Z is a smooth function of theta,
+# which matters a lot for the optimizer. Their theta-dependent grid in
+# _build_grid jitters the objective at the 1e-8 level and stalls line searches.
+_x, _w = np.polynomial.legendre.leggauss(256)
+_bq = 0.5 * (_x + 1.0)
+_wq = 0.5 * _w
+
+def log_Z(mu_b, mu_c, sig_b, sig_c):
+    """log of the acceptance fraction: P(0 < C < B < 1)."""
+    inner = ndtr((_bq - mu_c) / sig_c) - ndtr(-mu_c / sig_c)
+    Z = np.dot(_wq, norm.pdf(_bq, mu_b, sig_b) * inner)
+    return np.log(max(Z, 1e-300))
+
+def _nll(theta, B, C):
+    mu_b, mu_c, log_sb, log_sc = theta        # log-sigmas keep them positive
+    sb, sc = np.exp(log_sb), np.exp(log_sc)
+    ll = norm.logpdf(B, mu_b, sb).sum() + norm.logpdf(C, mu_c, sc).sum()
+    return -(ll - len(B) * log_Z(mu_b, mu_c, sb, sc))
+
+def fit_ellipsoid_params(B, C):
+    """Returns (mu_b, mu_c, sigma_b, sigma_c) and the fitted acceptance."""
+    theta0 = [B.mean(), C.mean(),
+              np.log(B.std(ddof=1)), np.log(C.std(ddof=1))]
+    res = minimize(_nll, theta0, args=(B, C), method="Nelder-Mead",
+                   options=dict(xatol=1e-7, fatol=1e-9, maxiter=20000))
+    mu_b, mu_c, lsb, lsc = res.x
+    params = np.array([mu_b, mu_c, np.exp(lsb), np.exp(lsc)])
+    return params, np.exp(log_Z(*params))
+
+
+def _in_support(a, b, c):
+    """Boolean mask for the physical region A>0, 0<C<B<1."""
+    return (a > 0) & (c > 0) & (b > c) & (b < 1)
+def cov_fit(a, b, c, verbose=True):
+    """
+    Moment-matched fit returning theta in the (sigma, rho) convention.
+
+    Fast and exact for an *untruncated* Gaussian; slightly biased when the
+    truncation at the (0, 1) boundaries clips real probability mass.  Use
+    fit_truncated_mle() afterwards if that bias matters.
+    """
+    a, b, c = map(np.asarray, (a, b, c))
+    mask = _in_support(a, b, c)
+    if not mask.all():
+        if verbose:
+            print(f"cov_fit(): dropping {(~mask).sum()} points outside the physical region")
+        a, b, c = a[mask], b[mask], c[mask]
+
+    mu_a, mu_b, mu_c = a.mean(), b.mean(), c.mean()
+    sig_a = a.std(ddof=1)
+    sig_b = b.std(ddof=1)
+    sig_c = c.std(ddof=1)
+
+    s_ac = np.cov(a, c, ddof=1)[0, 1]
+    rho_ac = s_ac / (sig_a * sig_c)
+    # sample correlations can land on +/-1 for tiny n; clip to stay PD
+    rho_ac = float(np.clip(rho_ac, -1.0 + 1e-6, 1.0 - 1e-6))
+    params = np.array([mu_a, mu_b, mu_c, sig_a, sig_b, sig_c, rho_ac])
+    #check if measured params are attainable
+    return params
+
 
 
 def n_params(obj):
@@ -180,11 +288,15 @@ def sample_model(params, n_samples=20000, rng=None):
 def sample_model_projections(params, n_samples=20000):
     """Projected axis ratios q (and projected a) for a parameter vector."""
     B, C, A,_ = generate_ellipsoid_distribution(params,n_samples)
+
+    if len(B) <n_samples:
+        print(f'insufficient samples generated for {params}')
+    n_samples = len(B)
     phi,theta = random_viewing_angles(n_samples)
 
     alpha, beta = projected_semi_axes(phi, theta, B, C)
     q_model = beta / alpha
-    a_model = A * np.sqrt(alpha * beta)
+    a_model = A + 0.5*np.log10(alpha*beta)
     return np.asarray(q_model), np.asarray(a_model)
 
 
@@ -269,30 +381,72 @@ def plot_corner(samples, max_prob_params=None, true_params=None,
 
 
 
+#
+# def _shape_contours(ax, params, color, n_samples=20000, bins=30, seed=None,
+#                     linewidths=1.4, linestyles='-'):
+#     """Draw 1/2/3-sigma density contours of the B/A-C/A distribution implied
+#     by `params` (4- or 7-parameter). Returns nothing."""
+#     rng = np.random.default_rng(seed)
+#     _, bm, cm = sample_model(params, n_samples, rng=rng)
+#     H, xe, ye = np.histogram2d(bm, cm, bins=bins, range=[[0, 1], [0, 1]],
+#                                density=True)
+#     levels = _density_levels(H.T)
+#     xc, yc = 0.5 * (xe[1:] + xe[:-1]), 0.5 * (ye[1:] + ye[:-1])
+#     ax.contour(xc, yc, H.T, levels=levels, colors=color,
+#                linewidths=linewidths, linestyles=linestyles)
 
-def _shape_contours(ax, params, color, n_samples=20000, bins=30, seed=None,
-                    linewidths=1.4, linestyles='-'):
-    """Draw 1/2/3-sigma density contours of the B/A-C/A distribution implied
-    by `params` (4- or 7-parameter). Returns nothing."""
-    rng = np.random.default_rng(seed)
-    _, bm, cm = sample_model(params, n_samples, rng=rng)
-    H, xe, ye = np.histogram2d(bm, cm, bins=bins, range=[[0, 1], [0, 1]],
-                               density=True)
-    levels = _density_levels(H.T)
+from scipy.ndimage import gaussian_filter
+# from your_module import EllipsoidDistribution
+
+def _shape_contours(ax, params, color, n_samples=100000, seed=None,
+                    linestyles='-', linewidths=2.0, levels=(0.6827,),
+                    n_grid=200, smooth=3.0):
+    """
+    Draw contours enclosing `levels` of the probability mass of the truncated
+    model defined by `params`. Density is a smoothed 2D histogram of samples
+    from EllipsoidDistribution, so it respects the 0 < C < B < 1 truncation
+    that a plain Ellipse patch ignores.
+    """
+    p = unpack_params(np.asarray(params, dtype=float).ravel())
+    dist = EllipsoidDistribution([p['mu_B'], p['mu_C'], p['sigma_B'], p['sigma_C']],
+                                 rng=np.random.default_rng(seed))
+    if dist.acc <= 0.0:
+        return
+    B, C, _ = dist.sample(n_samples)
+
+    # Grid spans the sampled range, so `smooth` is a fixed fraction of the
+    # width of the distribution rather than a fixed fraction of the unit box.
+    def _edges(v):
+        lo, hi = v.min(), v.max()
+        pad = 0.1 * max(hi - lo, 1e-6)
+        return np.linspace(lo - pad, hi + pad, n_grid + 1)
+
+    xe, ye = _edges(B), _edges(C)
+    H, _, _ = np.histogram2d(B, C, bins=[xe, ye])
+    H = gaussian_filter(H, smooth)
+
     xc, yc = 0.5 * (xe[1:] + xe[:-1]), 0.5 * (ye[1:] + ye[:-1])
-    ax.contour(xc, yc, H.T, levels=levels, colors=color,
-               linewidths=linewidths, linestyles=linestyles)
+    X, Y = np.meshgrid(xc, yc, indexing='ij')
+    H[Y >= X] = 0.0          # C < B is a hard edge; don't let smoothing bleed over it
+
+    flat = np.sort(H.ravel())[::-1]
+    cum = np.cumsum(flat) / flat.sum()
+    heights = np.unique([flat[min(np.searchsorted(cum, l), flat.size - 1)]
+                         for l in sorted(levels, reverse=True)])
+
+    ax.contour(X, Y, H, levels=heights, colors=[color],
+               linestyles=linestyles, linewidths=linewidths)
 
 
 def _param_text(fit, ndim, prefix=""):
     """One text block per inference: mu +/- sigma for B and C, plus sigma_ac
     when the model carries it."""
     lines = [
-        rf"$\mu_B={fit['mu_B']:.3f}\pm{fit['sigma_B']:.3f}$",
-        rf"$\mu_C={fit['mu_C']:.3f}\pm{fit['sigma_C']:.3f}$",
+        rf"$\mu_Q={fit['mu_B']:.3f}\pm{fit['sigma_B']:.3f}$",
+        rf"$\mu_S={fit['mu_C']:.3f}\pm{fit['sigma_C']:.3f}$",
     ]
     if ndim == 7 and 'sigma_ac' in fit:
-        lines.append(rf"$\sigma_{{ac}}={fit['sigma_ac']:.3f}$")
+        lines.append(rf"$\sigma_{{AS}}={fit['sigma_ac']:.3f}$")
     if prefix:
         lines.insert(0, prefix)
     return "\n".join(lines)
@@ -303,7 +457,10 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
                           focus_on_max_prob=True, show_samples=False, show_ellipses=True,
                           intrinsic_data=None,
                           kf_key='2R_eff', show_contours=None, n_model_samples=20000,
-                          seed=None, annotate=True):
+                          seed=None, annotate=True,
+                          intrinsic_label="Intrinsic Distribution",
+                          inferred_label="Model Distribution"):
+
     """
     Plot B/A vs C/A for one or more inferences. Each entry may be a 4- or
     7-parameter fit; the relevant components are extracted by name, so the two
@@ -324,7 +481,13 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
     """
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.plot([0, 1], [0, 1], 'k--', alpha=0.5)
-
+    use_contours = True if show_contours is None else show_contours
+    intrinsinc_color = 'k'
+    if intrinsic_label =='Image Model':
+        intrinsinc_color = color[0]
+        color = ['gray']
+        
+    
     if color is None:
         color = plt.cm.tab10.colors[:len(samples_list)]
     elif isinstance(color, str) or (isinstance(color, tuple)
@@ -343,8 +506,13 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
             samples_list, max_prob_list, true_params_list, labels, color):
 
         label = label.split('.')[0]
+        if label != '':
+            label = '(' + label + ')'
+
+
         samples = np.asarray(samples)
-        ndim = samples.shape[1]
+        # ndim = samples.shape[1]
+        ndim = len(true_params)
 
         iB = param_index(ndim, 'mu_B')
         iC = param_index(ndim, 'mu_C')
@@ -362,7 +530,7 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
 
         # contours for the 7-parameter model, ellipses for the 4-parameter one,
         # unless the caller overrides it
-        use_contours = False#(ndim == 7) if show_contours is None else show_contours
+        #use_contours = False#(ndim == 7) if show_contours is None else show_contours
 
         if true_params is not None:
             true_params = np.asarray(true_params, dtype=float).ravel()
@@ -382,25 +550,25 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
             # --- truth ---
             if true_params is not None:
                 if use_contours:
-                    _shape_contours(ax, true_params, 'k', n_samples=n_model_samples,
-                                    seed=seed, linestyles=':', linewidths=2.0)
-                    ax.plot(-1, -1, c='k', linestyle=':', linewidth=2.5,
-                            label=rf"Intrinsic Distribution ({label}, 1$\sigma$)")
+                    _shape_contours(ax, true_params, intrinsinc_color, n_samples=100000,
+                                    seed=seed, linestyles=':', linewidths=3)
+                    ax.plot(-1, -1, c=intrinsinc_color, linestyle=':', linewidth=3,
+                            label=rf"{intrinsic_label} {label}")
                 elif _sensible_ellipse(truth['sigma_B'], truth['sigma_C']):
                     ax.add_patch(Ellipse(
                         xy=(truth['mu_B'], truth['mu_C']),
                         width=2 * truth['sigma_B'], height=2 * truth['sigma_C'],
                         edgecolor='k', facecolor='none', linestyle=':',
                         alpha=1, linewidth=2.5))
-                    ax.plot(-1, -1, c='k', linestyle=':', linewidth=2.5,
-                            label=f"Intrinsic Distribution ({label})")
+                    ax.plot(-1, -1, c=intrinsinc_color, linestyle=':', linewidth=2.5,
+                            label=rf"{intrinsic_label} {label}")
 
             # --- inferred ---
             if use_contours:
-                _shape_contours(ax, max_prob, col, n_samples=n_model_samples,
+                _shape_contours(ax, max_prob, col, n_samples=100000,
                                 seed=seed, linestyles='-', linewidths=2.0)
                 ax.plot(-1, -1, c=col, linestyle='-', linewidth=2.5,
-                        label=rf"Inferred Distribution ({label}, 1/2/3$\sigma$)")
+                        label=f"{inferred_label} {label}")
             elif _sensible_ellipse(fit['sigma_B'], fit['sigma_C']):
                 ax.add_patch(Ellipse(
                     xy=(fit['mu_B'], fit['mu_C']),
@@ -408,27 +576,27 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
                     edgecolor=col, facecolor='none', linestyle='-',
                     alpha=1, linewidth=2.5))
                 ax.plot(-1, -1, c=col, linestyle='-', linewidth=2.5,
-                        label=f"Inferred Distribution ({label})")
+                        label=f"{inferred_label} {label}")
 
         if annotate:
-            src = truth
-            head = f"(Intrinsinc) "
-            text_blocks.append((_param_text(src, ndim, prefix=head), 'k'))
-            src =  fit
-            head = f"(Inferred)"
-            text_blocks.append((_param_text(src, ndim, prefix=head), col))
+            if true_params is not None:
+                text_blocks.append((_param_text(truth, ndim, prefix=f"({intrinsic_label}) "), intrinsinc_color))
+            text_blocks.append((_param_text(fit, ndim, prefix=f"({inferred_label})"), 'k'))
+
 
         if label in KF_DATA:
-            a, b = KF_DATA[label][kf_key]['center']
-            a_std, b_std = KF_DATA[label][kf_key]['std']
-            ax.add_patch(Ellipse(xy=(a, b), width=2 * a_std, height=2 * b_std,
-                                 facecolor='none', edgecolor=KF_ELL_COLORS[label],
-                                 linestyle='--', linewidth=2.5))
+            params = KF_DATA[label][kf_key]['params']
+            _shape_contours(ax, params, KF_ELL_COLORS[label], n_samples=100000,)
+
+            # a_std, b_std = KF_DATA[label][kf_key]['std']
+            # ax.add_patch(Ellipse(xy=(a, b), width=2 * a_std, height=2 * b_std,
+            #                      facecolor='none', edgecolor=KF_ELL_COLORS[label],
+            #                      linestyle='--', linewidth=2.5))
             ax.plot(-1, -1, c=KF_ELL_COLORS[label], linestyle='--', linewidth=2.5,
                     label=f'{label}')
         if intrinsic_data is not None:
             a,ba,ca = intrinsic_data
-            ax.scatter(ba, ca, marker='*', s=30, color = 'gray')
+            ax.scatter(ba, ca, marker='*', s=50, color = 'gray')
     if sc is not None:
         cb = fig.colorbar(sc, ax=ax, label=r'$\sqrt{\sigma_B^2 + \sigma_C^2}$')
         cb.solids.set_alpha(1)
@@ -535,7 +703,7 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
 #                         edgecolor='k', facecolor='none', linestyle=':',
 #                         alpha=1, linewidth=2.5))
 #                     ax.plot(-1, -1, c='k', linestyle=':', linewidth=2.5,
-#                             label=f"Intrinsic Distribution ({label})")
+#                             label=f"Intrinsic Distribution {label}")
 #
 #             if _sensible_ellipse(fit['sigma_B'], fit['sigma_C']):
 #                 ax.add_patch(Ellipse(
@@ -544,7 +712,7 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
 #                     edgecolor=col, facecolor='none', linestyle='-',
 #                     alpha=1, linewidth=2.5))
 #                 ax.plot(-1, -1, c=col, linestyle='-', linewidth=2.5,
-#                         label=f"Inferred Distribution ({label})")
+#                         label=f"Inferred Distribution {label}")
 #
 #         if label in KF_DATA:
 #             a, b = KF_DATA[label][kf_key]['center']
@@ -581,7 +749,7 @@ def plot_ellipsoid_shapes(samples_list, max_prob_list, true_params_list=None, la
 # # Full shape-distribution figure (main use for 7-parameter fits)
 # # ===========================================================================
 
-def plot_shape_distribution(params=None, a_data=None, b_data=None, c_data=None,
+def plot_covariant_distribution(params=None, a_data=None, b_data=None, c_data=None,
                             n_model_samples=20000, label="data",
                             color="tab:blue", model_color="tab:red",
                             output_file=None, title=None, seed=None,
@@ -602,6 +770,7 @@ def plot_shape_distribution(params=None, a_data=None, b_data=None, c_data=None,
     """
     have_model = params is not None
     have_data = b_data is not None and c_data is not None
+    fit = cov_fit(a_data,b_data,c_data)
 
     if not (have_model or have_data):
         raise ValueError("Need at least one of `params` or (b_data, c_data).")
@@ -717,7 +886,8 @@ def plot_shape_distribution(params=None, a_data=None, b_data=None, c_data=None,
 
 def plot_projected_distributions(q_obs_list, labels=None, colors=None, bin_width=0.04,
                                  output_file=None, title=None, kde=True,
-                                 precomputed_overlays=None):
+                                 precomputed_overlays=None,
+                                 nbins=None):
     """
     Histograms of projected axis ratios for multiple distributions. Model-free;
     unchanged in behaviour from the original.
@@ -734,7 +904,6 @@ def plot_projected_distributions(q_obs_list, labels=None, colors=None, bin_width
         colors = plt.cm.tab10.colors[:len(q_obs_list)]
     if labels is None:
         labels = [f"Distribution {i + 1}" for i in range(len(q_obs_list))]
-
     bins = np.arange(0, 1.01, bin_width)
 
     for q_obs, label, color in zip(q_obs_list, labels, colors):
@@ -764,8 +933,9 @@ def plot_projected_distributions(q_obs_list, labels=None, colors=None, bin_width
 
     ax.set_xlabel('Projected Axis Ratio (q = b/a)', fontsize=28)
     ax.set_ylabel('Density', fontsize=28)
-    ax.legend(fontsize=15)
-    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=18)
+    # ax.grid(True, alpha=0.3)
+    ax.set_ylim(0,2.5)
     plt.tight_layout()
 
     if output_file:
@@ -781,7 +951,7 @@ def plot_q_comparison(q_data, params, n_model_samples=50000, bin_width=0.04,
     Compare an observed projected axis-ratio distribution to the model's, using
     the same bins as the likelihood. `params` may be 4- or 7-dimensional.
     """
-    q_model, _ = sample_model_projections(params, n_model_samples)
+    q_model,_ = sample_model_projections(params, n_model_samples)
     bins = np.arange(0, 1.0001, bin_width)
 
     fig, ax = plt.subplots(figsize=(6.5, 4.5))
@@ -815,7 +985,12 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None,
                                             output_file=None, title=None, kde=False,
                                             model_samples=10000,
                                             q_model_list=None, q_true_list=None,
-                                            verbose=True):
+                                            verbose=True,
+                                            type='q',
+                                            obs_label="Synthetic Observed",
+                                            model_label="Model",
+                                            true_label="True"):
+
     """
     Observed projected axis-ratio histograms with model and truth overlays.
 
@@ -826,41 +1001,49 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None,
 
     KS statistics (observed/model/truth) are printed for each distribution.
     """
-    fig, ax = plt.subplots(figsize=(10, 7))
+    fig, ax = plt.subplots(figsize=(8, 6))
 
     if colors is None:
         colors = plt.cm.tab10.colors[:len(q_obs_list)]
     if labels is None:
         labels = [f"Distribution {i + 1}" for i in range(len(q_obs_list))]
+    if type == 'q':
+        bins = np.arange(0, 1.01, bin_width)
+        x_grid = np.linspace(0, 1, 500)
+    elif type == 'a':
 
-    bins = np.arange(0, 1.01, bin_width)
-    x_grid = np.linspace(0, 1, 500)
-    true_color = 'red'
+        min_q = min([min(q_obs_list[0]), min(q_true_list[0]),min(q_model_list[0])])
+        max_q = max([max(q_obs_list[0]), max(q_true_list[0]),max(q_model_list[0])])
+        bins = np.linspace(min_q, max_q, 20)
+        x_grid = np.linspace(min_q,max_q, 500)
+    true_color = 'gray'
     ks_results = {}
 
     for i, (q_obs, label, color) in enumerate(zip(q_obs_list, labels, colors)):
-        if color == 'red':
+        if color == 'gray':
             color = 'purple'
 
         q_obs = np.asarray(q_obs)
 
-        ax.hist(q_obs, bins=bins, alpha=1, color=color, label=f"{label} (Mock Observed)",
-                density=True, histtype='step', linewidth=2.5, linestyle='--')
+        ax.hist(q_obs, bins=bins, alpha=1, color=color, label=f"{label} ({obs_label})",
+                density=True, histtype='step', linewidth=3, linestyle='--')
+
         if kde and len(q_obs) > 100:
             ax.plot(x_grid, gaussian_kde(q_obs)(x_grid),
-                    color=color, linestyle='--', linewidth=2)
+                    color=color, linestyle='-', linewidth=2)
 
         # --- model curve ---
         q_model = None
         if q_model_list is not None and i < len(q_model_list):
             q_model = np.asarray(q_model_list[i])
-        elif model_params_list is not None and i < len(model_params_list) \
-                and model_params_list[i] is not None:
-            q_model, _ = sample_model_projections(model_params_list[i], model_samples)
+        # elif model_params_list is not None and i < len(model_params_list) \
+        #         and model_params_list[i] is not None:
+        #     q_model, _ = sample_model_projections(model_params_list[i], model_samples)
 
         if q_model is not None:
-            ax.hist(q_model, bins=bins, alpha=1, color='k', label=f"{label} (Model)",
-                    density=True, histtype='step', linewidth=2.5, linestyle='-')
+            ax.hist(q_model, bins=bins, alpha=1, color='k', label=f"{label} ({model_label})",
+                    density=True, histtype='step', linewidth=3, linestyle='-')
+
             if kde and len(q_model) > 100:
                 ax.plot(x_grid, gaussian_kde(q_model)(x_grid),
                         color='k', linestyle='--', linewidth=2)
@@ -874,8 +1057,9 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None,
             q_true, _ = sample_model_projections(true_params_list[i], model_samples)
 
         if q_true is not None:
-            ax.hist(q_true, bins=bins, alpha=1, color=true_color, label=f"{label} (True)",
-                    density=True, histtype='step', linewidth=2.5, linestyle='-')
+            ax.hist(q_true, bins=bins, alpha=1, color=true_color, label=f"{label} ({true_label})",
+                    density=True, histtype='step', linewidth=3, linestyle=':')
+
             if kde and len(q_true) > 100:
                 ax.plot(x_grid, gaussian_kde(q_true)(x_grid),
                         color=true_color, linestyle=':', linewidth=2)
@@ -896,11 +1080,12 @@ def plot_projected_distributions_with_model(q_obs_list, model_params_list=None,
                            else "different (reject H0)")
                 print(f"{name}: D={d:.4f}, p={p:.4e}  ->  {verdict}")
 
-    ax.set_xlabel(r'Projected Axis Ratio ($q = b/a$)', fontsize=30)
-    ax.set_ylabel('Density', fontsize=30)
+    ax.set_xlabel(r'Projected Axis Ratio ($q = b/a$)', fontsize=28)
+    ax.set_ylabel('Density', fontsize=28)
     ax.tick_params(axis='both', which='major', labelsize=20)
-    ax.legend(fontsize=16, loc='upper left')
-    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=20, loc='upper left')
+    ax.set_ylim(0,3)
+    # ax.grid(True, alpha=0.3)
 
     if title:
         fig.suptitle(title, fontsize=15)
@@ -1050,7 +1235,7 @@ def plot_comparison_grid(results_dict, output_file=None, title=None):
 
     table_cols = ['Shape']
     for name in plain:
-        table_cols += [f'{name} (True)', f'{name} (Inferred)']
+        table_cols += [f'{name} (True)', f'{name} (Model)']
 
     table_data = []
     for shape_name, results in results_dict.items():

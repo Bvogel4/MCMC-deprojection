@@ -5,8 +5,8 @@ import warnings
 import traceback
 import logging
 
-
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse
@@ -32,26 +32,28 @@ os.environ['TANGOS_DB_CONNECTION'] = db_connection
 os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
 sys.path.append(sys_path)
 import tangos
-
-
 # Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("IsophoteAnalysis")
 
-
 _IMAGING_ARRAYS = ['pos', 'mass', 'eps', 'metals', 'tform', 'massform', 'age']
 
 N_GRID = 100
-N_PROCS = 30
+N_PROCS = 40
 MIN_NSTAR = 5000
+# Radius, in face-on Reff, at which the 3-D shape is evaluated as truth. Must match the
+# `radius` used in tangos_testing.ipynb when ba_s/ca_s are interpolated.
+#SHAPE_RADIUS_REFF = np.array([1,1.5,3])
+target_reffs = [2,3,4]
 MAX_HALOS = 50
-PLOT = True
+PLOT = False
+QUAD = True #plot only top right quadrant
 if PLOT:
     N_PROCS = 1
     print('Plotting requires a single thread, run without to process data first in parallel.')
 
-CACHE_ROOT = '/home/bk639/MCMC-deprojection/caches'          # <-- adjust
+CACHE_ROOT = '/home/bk639/MCMC-deprojection/caches'  # <-- adjust
 FIGURE_DIR = os.path.join(results_output_directory, 'figures')
 OUTPUT_PICKLE = 'ellipse_data_n_{}.pickle'.format(N_GRID)
 
@@ -62,8 +64,6 @@ os.makedirs(FIGURE_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-
-
 
 
 def extract_floats(data):
@@ -104,6 +104,7 @@ def extract_floats(data):
     if is_dict:
         return thetas, phis, values
     return thetas, phis
+
 
 def inverse_transform_intrinsic(theta, phi):
     """Given spherical angles, compute required intrinsic X and Y rotations
@@ -159,15 +160,14 @@ def spherical_to_rotation_angles(theta, phi):
     return X_deg, Y_deg
 
 
-
 def create_spherical_grid(N):
     theta_list, phi_list = np.ones(N + 2), np.ones(N + 2)
-    N_count=0
+    N_count = 0
     a = 4 * np.pi / N
     d = np.sqrt(a)
     M_theta = int(np.round(np.pi / d))
     d_theta = np.pi / M_theta
-    
+
     d_phi = a / d_theta
     for m in range(M_theta):
         theta = np.pi * (m + 0.5) / M_theta
@@ -178,9 +178,9 @@ def create_spherical_grid(N):
             N_count += 1
 
     # manually add points at face-on and exactly opposite
-    theta_list[N_count],phi_list[N_count] = 0,0
+    theta_list[N_count], phi_list[N_count] = 0, 0
     N_count += 1
-    theta_list[N_count],phi_list[N_count] = np.pi ,0
+    theta_list[N_count], phi_list[N_count] = np.pi, 0
     # remove any nans
     nanmask = np.isnan(theta_list)
     theta_list, phi_list = theta_list[~nanmask], phi_list[~nanmask]
@@ -188,6 +188,7 @@ def create_spherical_grid(N):
     x_angles, y_angles = spherical_to_rotation_angles(theta_list, phi_list)
 
     return theta_list, phi_list, x_angles, y_angles
+
 
 class ImageHalo:
     """Base class for generating luminosity/density images at different orientations
@@ -202,12 +203,12 @@ class ImageHalo:
     sb_profile_key = None
     lum_den_key = None
     magnitude_key = None
+
     # Arrays needed for V-band imaging + Sersic profiles. 'pos'/'mass'/'eps' are
     # required; the rest feed pynbody's luminosity derivations. Missing ones are
     # skipped silently -- if a profile key comes back empty, add the missing name.
 
-
-    def __init__(self, cache_dir='image_cache',n_grid=100, n_procs=1):
+    def __init__(self, cache_dir='image_cache', n_grid=100, n_procs=1):
         self.cache_dir = cache_dir
         self.n_grid = n_grid
         self.n_procs = n_procs
@@ -292,6 +293,7 @@ class ImageHalo:
         if 'pos' not in data:
             raise RuntimeError("could not extract 'pos' from particles")
         return data
+
     @staticmethod
     def build_private_snapshot(data, properties):
         """Build a standalone snapshot owned solely by the calling process.
@@ -368,9 +370,10 @@ class ImageHalo:
             orientation_data[f'{self.imaging_qty}'] = prof[self.lum_den_key].copy().view(np.ndarray)
 
         if self.magnitude_key:
-            orientation_data[f'mags_{self.imaging_qty.split("_")[0]}'] = prof[self.magnitude_key].copy().view(np.ndarray)
+            orientation_data[f'mags_{self.imaging_qty.split("_")[0]}'] = prof[self.magnitude_key].copy().view(
+                np.ndarray)
             orientation_data['lum_den'] = (
-                        10.0 ** (-0.4 * prof[self.magnitude_key]) / prof._binsize.in_units('pc^2')).copy().view(np.ndarray)
+                    10.0 ** (-0.4 * prof[self.magnitude_key]) / prof._binsize.in_units('pc^2')).copy().view(np.ndarray)
 
         if self.imaging_qty == 'rho':
             orientation_data['rho'] = prof['density'].copy().view(np.ndarray)
@@ -382,8 +385,6 @@ class ImageHalo:
 
         orientation_data['image'] = self.generate_image(particles, width)
         return orientation_data
-
-
 
     def process_halo(self, halo, halo_id, existing_properties=None, overwrite=False):
         """Generate images across viewing angles, checkpointing each orientation."""
@@ -443,8 +444,8 @@ class ImageHalo:
                 sb_dict = self.process_orientation(snap, width, Rhalf)
                 self.save_orientation(halo_id, key, sb_dict)
 
-                #print(f'{i + 1}/{len(xrotations)} done for halo {halo_id} '
-                      #f'(x={xrotations[i]}, y={yrotations[i]})')
+                # print(f'{i + 1}/{len(xrotations)} done for halo {halo_id} '
+                # f'(x={xrotations[i]}, y={yrotations[i]})')
 
             del snap
 
@@ -527,7 +528,6 @@ class VBandStarImages(ImageHalo):
     magnitude_key = 'magnitudes,V'
 
 
-
 class iBandStarImages(ImageHalo):
     """i-band images for stellar particles."""
 
@@ -550,7 +550,7 @@ class IsophoteAnalysis:
     produced by VBandStarImages, and checkpoints isophote results after every
     orientation into a single pickle file so runs can resume."""
 
-    def __init__(self, image_type='v_stars', cache_dir='isophote_cache',n_procs = 1):
+    def __init__(self, image_type='v_stars', cache_dir='isophote_cache', n_procs=1):
         self.image_type = image_type
         self.cache_dir = cache_dir
         self.visualization_enabled = False
@@ -571,7 +571,6 @@ class IsophoteAnalysis:
             return {}
         with open(path, 'rb') as fh:
             return pickle.load(fh)
-
 
     def save_cache(self, halo_id, params):
         """Atomically rewrite the checkpoint dict."""
@@ -601,10 +600,10 @@ class IsophoteAnalysis:
                 f"NaN values in {nan_keys}."
             )
 
-        center_x      = result['x0'] / kpc_per_pixel
-        center_y      = result['y0'] / kpc_per_pixel
-        eps           = float(np.clip(1.0 - result['q'], 0.01, 0.85))
-        pa            = float(result['theta'])
+        center_x = result['x0'] / kpc_per_pixel
+        center_y = result['y0'] / kpc_per_pixel
+        eps = float(np.clip(1.0 - result['q'], 0.01, 0.85))
+        pa = float(result['theta'])
         radius_factor = float(np.clip(result['reff'] / reff_kpc, 2.5, 4.5))
 
         return center_x, center_y, eps, pa, radius_factor
@@ -632,7 +631,7 @@ class IsophoteAnalysis:
         )
 
         try:
-            ellipse = Ellipse(image_data,geometry=geometry)
+            ellipse = Ellipse(image_data, geometry=geometry)
             isolist = ellipse.fit_image(
                 minsma=1.0 * radius_pixels,
                 maxsma=5.0 * radius_pixels,
@@ -685,16 +684,27 @@ class IsophoteAnalysis:
         """Measure isophotes for every orientation, checkpointing as we go."""
         kpc_per_pixel = (9 * Rhalf) / np.size(images[0], axis=0)
         step_size_factors = [1.0, 0.5, 0.25, 0.125]
+
         if params is None:
             params = self.load_cache(halo_id)
-        shared_params = pymp.shared.dict()
-        for k, v in params.items():
-            shared_params[k] = v
-        failed = pymp.shared.list()
+
         n = len(images)
+
+        # Nothing left to do -- skip the fork entirely.
+        if all(o in params for o in orientations):
+            return [params[key] for key in sorted(params.keys())]
+
+        # NOTE: pymp forks with a bare os.fork(), so multiprocessing's
+        # after-fork hook never runs and proxy connections are NOT reset in
+        # the children. Any manager proxy touched in the parent before the
+        # fork is shared by every child and will corrupt. So: `params` stays
+        # an ordinary dict (inherited copy-on-write, read-only in workers),
+        # and `results` is never touched until we are already inside a child.
+        results = pymp.shared.dict()
 
         started = pymp.shared.array((1,), dtype='int64')
         completed = pymp.shared.array((1,), dtype='int64')
+        n_failed = pymp.shared.array((1,), dtype='int64')
 
         sys.stdout.write('\n\n')  # reserve 2 lines for the bars
         sys.stdout.flush()
@@ -707,18 +717,19 @@ class IsophoteAnalysis:
 
                 with p.lock:
                     started[0] += 1
-                    print_progress(started[0], completed[0], n, len(failed))
+                    print_progress(started[0], completed[0], n, n_failed[0])
 
-                # Checkpoint skip: already computed this orientation.
-                if orientation in shared_params:
+                # Checkpoint skip: plain dict lookup, no IPC.
+                if orientation in params:
                     with p.lock:
                         completed[0] += 1
-                        print_progress(started[0], completed[0], n, len(failed))
+                        print_progress(started[0], completed[0], n, n_failed[0])
                     continue
 
-                # --- Sérsic-based initial geometry ---
+                # --- Sersic-based initial geometry ---
                 center_x, center_y, initial_eps, initial_pa, radius_factor = \
                     self._sersic_initial_params(image_data, radius, kpc_per_pixel)
+
                 # --- Isophote fitting ---
                 try:
                     param_i, all_targets_met = self.fit_single_image(
@@ -731,24 +742,29 @@ class IsophoteAnalysis:
                     logger.error(f'Error in orientation {orientation}: {e}')
                     traceback.print_exc()
                     with p.lock:
-                        failed.append(orientation)
-                        completed[0] += 1  # done being processed, just unsuccessfully
-                        print_progress(started[0], completed[0], n, len(failed))
+                        n_failed[0] += 1
+                        completed[0] += 1
+                        print_progress(started[0], completed[0], n, n_failed[0])
                     continue
 
                 with p.lock:
-                    shared_params[orientation] = param_i
+                    results[orientation] = param_i
                     completed[0] += 1
-                    print_progress(started[0], completed[0], n, len(failed))
+                    print_progress(started[0], completed[0], n, n_failed[0])
 
         print()  # move past the bars
-        self.save_cache(halo_id, dict(shared_params))
 
-        if failed:
+        params.update(dict(results))
+        self.save_cache(halo_id, params)
+
+        n_missing = sum(1 for o in orientations if o not in params)
+        if n_missing:
+            missing = sorted(o for o in orientations if o not in params)
             raise RuntimeError(
-                f'halo {halo_id}: {len(failed)}/{n} orientations failed '
-                f'(check worker tracebacks above): {sorted(failed)}')
-        return [shared_params[key] for key in sorted(shared_params.keys())]
+                f'halo {halo_id}: {n_missing}/{n} orientations failed '
+                f'(check worker tracebacks above): {missing}')
+
+        return [params[key] for key in sorted(params.keys())]
 
     def run(self, halo_id, imager, overwrite=False):
         """Convenience entry point that pulls image data from a VBandStarImages
@@ -769,6 +785,7 @@ class IsophoteAnalysis:
             Rhalf=data['Rhalf'],
         )
 
+
 class SersicFitter:
     """2-D elliptical Sérsic fitter, extracted so it can be used by any
     LivePropertyCalculation without inheriting from the heavy ImageHalo class."""
@@ -781,7 +798,7 @@ class SersicFitter:
     @staticmethod
     def _elliptical_radius(x, y, x0, y0, theta, q):
         dx, dy = x - x0, y - y0
-        x_rot =  dx * np.cos(theta) + dy * np.sin(theta)
+        x_rot = dx * np.cos(theta) + dy * np.sin(theta)
         y_rot = -dx * np.sin(theta) + dy * np.cos(theta)
         return np.sqrt(x_rot ** 2 + (y_rot / q) ** 2)
 
@@ -819,7 +836,7 @@ class SersicFitter:
             par, _ = curve_fit(
                 cls._sersic_1d, x, y, p0=(m0, r0, 1),
                 bounds=([10, 0, 0.5], [40, 100, 16.5]))
-            return tuple(par)           # (mueff, reff, n)
+            return tuple(par)  # (mueff, reff, n)
         except (RuntimeError, ValueError):
             return np.nan, np.nan, np.nan
 
@@ -838,7 +855,7 @@ class SersicFitter:
         return mueff - (bn / np.log(10)) * ((r / reff) ** (1.0 / n) - 1.0)
 
     @classmethod
-    def fit_2d_log(cls, image, pixel_scale, p0_1d=None, rmax = None, rmin = None):
+    def fit_2d_log(cls, image, pixel_scale, p0_1d=None, rmax=None, rmin=None):
         """
         Fit 2-D elliptical Sérsic in log space.
 
@@ -905,14 +922,15 @@ class SersicFitter:
 class VBandIsophoteAnalysis(IsophoteAnalysis):
     """V-band isophote analysis (default)."""
 
-    def __init__(self, cache_dir='isophote_cache',n_procs=1):
-        super().__init__(image_type='v_stars',n_procs=n_procs, cache_dir=cache_dir)
+    def __init__(self, cache_dir='isophote_cache', n_procs=1):
+        super().__init__(image_type='v_stars', n_procs=n_procs, cache_dir=cache_dir)
+
 
 class iBandIsophoteAnalysis(IsophoteAnalysis):
     """V-band isophote analysis (default)."""
 
-    def __init__(self, cache_dir='isophote_cache',n_procs=1):
-        super().__init__(image_type='i_stars',n_procs=n_procs, cache_dir=cache_dir)
+    def __init__(self, cache_dir='isophote_cache', n_procs=1):
+        super().__init__(image_type='i_stars', n_procs=n_procs, cache_dir=cache_dir)
 
 
 # def plot_isophotes(images, isophote_params, orientations, reffs, rhalf, filename,
@@ -1042,6 +1060,177 @@ class iBandIsophoteAnalysis(IsophoteAnalysis):
 #
 #     return ellipse_dict
 
+# ---------------------------------------------------------------------------
+# Verbatim copy of nan_func / smooth_shape from MCMC_sims.py:88-160, inlined so that
+# working out the target radius does not pull in the whole MCMC stack. Importing
+# MCMC_sims executes `tangos.all_simulations()` at module scope and drags in
+# galaxy_ellipse_collection -> shape_inference -> emcee, none of which the imaging
+# pipeline needs. The real function is still preferred at runtime (see _smooth_shape);
+# this is the fallback, so the two must stay in step if MCMC_sims.smooth_shape changes.
+# ---------------------------------------------------------------------------
+def _nan_func(x):
+    return np.nan
+
+
+def _smooth_shape_local(rbins, a, b, c, k=3):
+    """
+    Smooth and filter data, handling a few NaN values gracefully.
+
+    Parameters:
+    rbins, a, b, c: array-like, input data (NaNs are assumed aligned across a, b, c)
+    k: int, degree of the smoothing spline (default 3, recommended cubic)
+
+    Returns:
+    rbins, a, b, c: filtered arrays
+    a_s, b_s, c_s: smoothed spline functions (or _nan_func if insufficient data)
+    """
+    import numpy as np
+    from scipy.interpolate import splrep, splev
+
+    s_factor = 1
+    d = 5  # outlier threshold in std devs
+    min_points = max(k + 1, 3)
+
+    nan_result = (rbins[:0], a[:0], b[:0], c[:0],
+                  _nan_func, _nan_func, _nan_func)
+
+    def _fit(rb, arrs):
+        """Fit a spline to each array in arrs, sharing the same domain bounds."""
+        xb, xe = rb[0], rb[-1]
+        tcks = [splrep(rb, arr, k=k, s=s_factor * len(rb), xb=xb, xe=xe) for arr in arrs]
+        return tcks, xb, xe
+
+    def _make_func(tck, xb, xe):
+        def f(x):
+            x = np.asarray(x)
+            x_clipped = np.clip(x, xb, xe)
+            return splev(x_clipped, tck)
+
+        return f
+
+    # Remove rows where any of a, b, c is NaN
+    mask = ~np.isnan(a) & ~np.isnan(b) & ~np.isnan(c)
+    rbins_f, a_f, b_f, c_f = rbins[mask], a[mask], b[mask], c[mask]
+
+    if len(rbins_f) < min_points:
+        return nan_result
+
+    # Initial splines
+    tcks, xb, xe = _fit(rbins_f, [a_f, b_f, c_f])
+
+    for i in range(3):
+        arr_f = (a_f, b_f, c_f)[i]  # rebuilt from current bindings each pass
+        residuals = arr_f - splev(rbins_f, tcks[i])
+        std = np.std(residuals)
+        if std > 0:
+            keep = np.abs(residuals) < d * std
+            rbins_f, a_f, b_f, c_f = rbins_f[keep], a_f[keep], b_f[keep], c_f[keep]
+
+        if len(rbins_f) < min_points:
+            return rbins_f, a_f, b_f, c_f, _nan_func, _nan_func, _nan_func
+
+        tcks, xb, xe = _fit(rbins_f, [a_f, b_f, c_f])
+
+    # Remove large gaps
+    diff = np.diff(rbins_f, prepend=0)
+    gap_mask = diff > 1
+    rbins_f, a_f, b_f, c_f = rbins_f[~gap_mask], a_f[~gap_mask], b_f[~gap_mask], c_f[~gap_mask]
+
+    if len(rbins_f) < min_points:
+        return rbins_f, a_f, b_f, c_f, _nan_func, _nan_func, _nan_func
+
+    # Final spline creation
+    tcks, xb, xe = _fit(rbins_f, [a_f, b_f, c_f])
+    a_s_func, b_s_func, c_s_func = (_make_func(tck, xb, xe) for tck in tcks)
+
+    return rbins_f, a_f, b_f, c_f, a_s_func, b_s_func, c_s_func
+
+
+def _smooth_shape():
+    """The project's own smooth_shape, so the radius we measure at is derived from the
+    identical spline the truth is. Falls back to raw interpolation if unavailable."""
+    try:
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from MCMC_sims import smooth_shape
+        return smooth_shape
+    except Exception as e:
+        print('  MCMC_sims.smooth_shape unavailable ({}); '
+              'using the inlined copy'.format(e))
+        return _smooth_shape_local
+
+
+def shape_semi_major(shape_profile, r_eval):
+    """Semi-major axis of the 3-D shape shell evaluated at radius/radii `r_eval` (kpc).
+
+    This is the radius an isophote must be measured at to describe the same ellipsoid as
+    the shape. Viewed down the minor axis, the shell tabulated at `rbins_s` projects to
+    an ellipse whose semi-major axis is `a`, not `rbins_s`. Measuring the isophote at
+    `rbins_s` instead pairs the projected shape with a larger, rounder shell and biases q
+    low -- for r563 halo 1, rbins = 2.80 kpc but a = 4.46 kpc.
+
+    Matches tangos_testing.ipynb: smooth_shape(rbins, a, b, c, k=3) then a_s_func(r_eval).
+
+    shape_profile : dict with 'rbins_s' and either 'a_s'/'b_s'/'c_s' or 'ba_s'/'ca_s'.
+    r_eval : float or array-like of radii (kpc).
+
+    Returns a float if `r_eval` is scalar, otherwise an array of the same shape.
+    """
+    r_eval_arr = np.asarray(r_eval, dtype=float)
+    scalar_input = (r_eval_arr.ndim == 0)
+    r_flat = np.atleast_1d(r_eval_arr)
+
+    def _finish(out):
+        out = np.asarray(out, dtype=float)
+        if scalar_input:
+            return float(out.reshape(-1)[0])
+        return out.reshape(r_eval_arr.shape)
+
+    rbins = np.asarray(shape_profile['rbins_s'], dtype=float)
+
+    if 'a_s' in shape_profile:
+        a = np.asarray(shape_profile['a_s'], dtype=float)
+        b = np.asarray(shape_profile['b_s'], dtype=float)
+        c = np.asarray(shape_profile['c_s'], dtype=float)
+    else:
+        # Older DBs store only the ratios. The shape calculation rescales each shell to
+        # preserve ellipsoidal volume (mytangosproperty.py:190-194), which pins
+        # (a*b*c)**(1/3) == rbins, so a = rbins / (ba*ca)**(1/3) exactly.
+        ba = np.asarray(shape_profile['ba_s'], dtype=float)
+        ca = np.asarray(shape_profile['ca_s'], dtype=float)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            a = rbins / (ba * ca) ** (1.0 / 3.0)
+        b, c = a * ba, a * ca
+
+    good = (np.isfinite(rbins) & np.isfinite(a) & np.isfinite(b) & np.isfinite(c)
+            & (a > 0))
+    if good.sum() < 4:
+        return _finish(np.full(r_flat.shape, np.nan))
+    rbins, a, b, c = rbins[good], a[good], b[good], c[good]
+
+    fallback = np.interp(r_flat, rbins, a)
+
+    smooth_shape = _smooth_shape()
+    if smooth_shape is not None:
+        try:
+            _, _, _, _, a_s_func, _, _ = smooth_shape(rbins, a, b, c, k=3)
+            vals = np.asarray(a_s_func(r_flat), dtype=float).reshape(r_flat.shape)
+            with np.errstate(invalid='ignore'):
+                ok = np.isfinite(vals) & (vals > 0)
+            return _finish(np.where(ok, vals, fallback))
+        except Exception as e:
+            print('  smooth_shape failed ({}); using raw interpolation'.format(e))
+
+    return _finish(fallback)
+
+
+def face_on_reff(image_dict):
+    """The face-on Reff, which is what the shape radius is expressed in."""
+    for i, k in enumerate(image_dict['orientations']):
+        if 't+0.000000_p+0.000000' in str(k):
+            return float(image_dict['reff_values'][i])
+    return np.nan
+
+
 def _parse_tp(key):
     """Return (theta, phi) in radians from an orientation key, or None."""
     m = re.search(r'np\.float64\(([^)]+)\)\s*,\s*np\.float64\(([^)]+)\)', key)
@@ -1052,32 +1241,32 @@ def _parse_tp(key):
     return float(m.group(1)), float(m.group(2))
 
 
-def _isophote_eps(iso_params, reff_pix, img_shape, kpc_per_pixel,
-                  grad_err_cut=0.15, grad_err_max=0.3):
-    """Return (ellipses_for_return, drawlist) where drawlist holds the ellipse
-    geometry to render: (x0, y0, sma, eps, pa, grad_err, linestyle)."""
-    ellipses = np.full(3, np.nan)
-    draw = []
-    cols = np.asarray(iso_params, dtype=float)
-    if cols.size == 0:
-        return ellipses, draw
-    cols = cols[cols[:, 3] < grad_err_cut]
-    if cols.shape[0] == 0:
-        return ellipses, draw
-
-    smas = cols[:, 0]
-    d = 0.5 / kpc_per_pixel * reff_pix
-    for k in (2, 3, 4):
-        idx = np.abs(smas - k * reff_pix).argmin()
-        sma, eps, pa, grad_err, x0, y0, intens, rms = cols[idx]
-        offset = np.hypot(img_shape[0] // 2 - x0, img_shape[1] // 2 - y0)
-        if rms == 0:
-            rms = 1e-3
-        if (offset < d) and (grad_err < grad_err_max):
-            ellipses[k - 2] = eps
-            ls = '-' if (intens / rms > 0.5 and intens > 1) else '--'
-            draw.append((x0, y0, sma, eps, pa, grad_err, ls))
-    return ellipses, draw
+# def _isophote_eps(iso_params, reff_pix, img_shape, kpc_per_pixel,
+#                   grad_err_cut=0.15, grad_err_max=0.3):
+#     """Return (ellipses_for_return, drawlist) where drawlist holds the ellipse
+#     geometry to render: (x0, y0, sma, eps, pa, grad_err, linestyle)."""
+#     ellipses = np.full(3, np.nan)
+#     draw = []
+#     cols = np.asarray(iso_params, dtype=float)
+#     if cols.size == 0:
+#         return ellipses, draw
+#     cols = cols[cols[:, 3] < grad_err_cut]
+#     if cols.shape[0] == 0:
+#         return ellipses, draw
+#
+#     smas = cols[:, 0]
+#     d = 0.5 / kpc_per_pixel * reff_pix
+#     for k in (2, 3, 4):
+#         idx = np.abs(smas - k * reff_pix).argmin()
+#         sma, eps, pa, grad_err, x0, y0, intens, rms = cols[idx]
+#         offset = np.hypot(img_shape[0] // 2 - x0, img_shape[1] // 2 - y0)
+#         if rms == 0:
+#             rms = 1e-3
+#         if (offset < d) and (grad_err < grad_err_max):
+#             ellipses[k - 2] = eps
+#             ls = '-' if (intens / rms > 0.5 and intens > 1) else '--'
+#             draw.append((x0, y0, sma, eps, pa, grad_err, ls))
+#     return ellipses, draw
 
 
 def _parse_tp(key):
@@ -1096,24 +1285,46 @@ def _wrap180(phi_rad):
 
 
 def _isophote_eps(iso_params, reff_pix, img_shape, kpc_per_pixel,
-                  grad_err_cut=0.15, grad_err_max=0.3):
-    """Return (eps at 2/3/4 Reff, list of ellipses to draw)."""
-    ellipses = np.full(3, np.nan)
+                  grad_err_cut=0.15, grad_err_max=0.3, target_sma_px=None,
+                  center_tol=2.0):
+    """Return (eps, achieved sma in px, ellipses to draw), one entry per target.
+
+    target_sma_px : float, array-like, or None
+        Semi-major axes in pixels to measure at. If None, falls back to
+        [2, 2.5, 3] * reff_pix.
+
+    The fit is not evaluated at the target: the nearest surviving isophote is
+    used, so the achieved sma is returned alongside eps. eps is NaN when the
+    nearest isophote fails the centering or gradient-error checks, but the
+    achieved sma is recorded regardless, which distinguishes "no acceptable
+    fit near this radius" from "no fit at all".
+    """
+    if target_sma_px is not None:
+        targets_px = np.atleast_1d(np.asarray(target_sma_px, dtype=float))
+    else:
+        targets_px = np.asarray(target_reffs, dtype=float) * reff_pix
+
+    n = len(targets_px)
+    ellipses = np.full(n, np.nan)
+    achieved_px = np.full(n, np.nan)
     draw = []
+
     cols = np.asarray(iso_params, dtype=float)
     if cols.size == 0:
-        return ellipses, draw
+        return ellipses, achieved_px, draw
     cols = cols[cols[:, 3] < grad_err_cut]
     if cols.shape[0] == 0:
-        return ellipses, draw
+        return ellipses, achieved_px, draw
 
     smas = cols[:, 0]
-    d = 0.5 / kpc_per_pixel * reff_pix
-    reffs = [2,2.5,3]
-    for i in range(len(reffs)):
-        target_reff = reffs[i]
-        idx = np.abs(smas - target_reff * reff_pix).argmin()
+    d = center_tol * reff_pix      # was 0.5 / kpc_per_pixel * reff_pix,
+                                                # which carried units of px^2/kpc
+    for i in range(n):
+        if not np.isfinite(targets_px[i]):
+            continue
+        idx = np.abs(smas - targets_px[i]).argmin()
         sma, eps, pa, grad_err, x0, y0, intens, rms = cols[idx]
+        achieved_px[i] = sma
         offset = np.hypot(img_shape[0] // 2 - x0, img_shape[1] // 2 - y0)
         if rms == 0:
             rms = 1e-3
@@ -1121,21 +1332,49 @@ def _isophote_eps(iso_params, reff_pix, img_shape, kpc_per_pixel,
             ellipses[i] = eps
             ls = '-' if (intens / rms > 0.5 and intens > 1) else '--'
             draw.append((x0, y0, sma, eps, pa, grad_err, ls))
-    return ellipses, draw
-
+    return ellipses, achieved_px, draw
 
 def plot_isophotes(images, isophote_params, orientations, reffs, rhalf,
-                            filename, plot=True, panel=2.6,
-                            grad_err_cut=0.15, grad_err_max=0.3,
-                            cmap_img='magma', cmap_iso='winter',
-                            theta_decimals=0, dpi=150,
-                            row_gap=0.004, col_gap=0.004):
+                   filename, plot=True, panel=2.6, target_sma_kpc=None,
+                   grad_err_cut=0.15, grad_err_max=0.3,
+                   cmap_img='magma', cmap_iso='winter',
+                   theta_decimals=0, dpi=150,
+                   row_gap=0.004, col_gap=0.004,
+                   quadrant=False, theta_range=None, phi_range=None):
     """One row per theta (0 at top, 180 at bottom), phi increasing left to
     right with phi = 0 in the same central column for every row.
-    Returns {orientation: array([eps_2reff, eps_3reff, eps_4reff])}.
+
+    quadrant : bool
+        If True, only the upper-right block is drawn: theta in [0, 90] and
+        wrapped phi in [0, 180]. Shorthand for
+        theta_range=(0, 90), phi_range=(0, 180).
+    theta_range, phi_range : (lo, hi) in degrees, or None
+        Inclusive limits on which panels are drawn. phi is compared after
+        wrapping into (-180, 180], i.e. the same value used for the column
+        ordering and the panel labels. These affect the figure only --- every
+        orientation is still measured and returned in the output dict, and the
+        image colour scale is still set from all images so a cut figure is
+        directly comparable with the full one.
+
+    target_sma_kpc : float, sequence of floats, or None
+        Absolute physical radii. Each is converted to a ratio r/Reff using the
+        face-on Reff only, and every orientation is then measured at
+        ratio * Reff(orientation).
+
+    Returns {orientation: {'eps', 'r_kpc', 'r_over_reff', 'target_ratios'}}.
     """
     kpc_per_pixel = (9 * rhalf) / images[0].shape[0]
     orientations = orientations[0:-1]
+
+    # ---- one ratio per target, fixed by the face-on (theta, phi) = (0, 0) Reff ----
+    if target_sma_kpc is None:
+        targets_kpc = np.full(3, np.nan)
+        ratios = np.asarray(target_reffs)
+    else:
+        targets_kpc = np.atleast_1d(np.asarray(target_sma_kpc, dtype=float))
+        face_on = next(i for i, key in enumerate(orientations)
+                       if _parse_tp(str(key)) == (0.0, 0.0))
+        ratios = targets_kpc / reffs[face_on]
 
     # ---- group by theta; sort by phi wrapped into (-180, 180] ----
     rows = {}
@@ -1147,82 +1386,129 @@ def plot_isophotes(images, isophote_params, orientations, reffs, rhalf,
         rows.setdefault(t_deg, []).append((_wrap180(tp[1]), i))
     for t in rows:
         rows[t].sort(key=lambda x: x[0])
-    theta_vals = sorted(rows)
-    nrows = len(theta_vals)
 
-    # ---- column index of phi=0 in each row, and the global grid width ----
-    zero_idx = {}
-    for t, entries in rows.items():
-        phis = np.array([e[0] for e in entries])
-        zero_idx[t] = int(np.abs(phis).argmin())  # entry nearest phi = 0
-    max_left = max(zero_idx[t] for t in theta_vals)
-    max_right = max(len(rows[t]) - 1 - zero_idx[t] for t in theta_vals)
-    ncols = max_left + max_right + 1
-    center_col = max_left  # phi = 0 lives here
+    # ---- decide which panels are drawn ----
+    if quadrant:
+        theta_range = (0.0, 90.0) if theta_range is None else theta_range
+        phi_range = (0.0, 180.0) if phi_range is None else phi_range
+    t_lo, t_hi = theta_range if theta_range is not None else (-np.inf, np.inf)
+    p_lo, p_hi = phi_range if phi_range is not None else (-np.inf, np.inf)
+    tol = 1e-6
+
+    def _keep(t_deg, phi_w):
+        p = np.degrees(phi_w)
+        return (t_lo - tol <= t_deg <= t_hi + tol and
+                p_lo - tol <= p <= p_hi + tol)
+
+    prows = {t: [e for e in entries if _keep(t, e[0])]
+             for t, entries in rows.items()}
+    prows = {t: e for t, e in prows.items() if e}
 
     ellipse_dict = {}
 
     if plot:
+        if not prows:
+            raise ValueError('no panels left after the theta/phi cut')
+
+        theta_vals = sorted(prows)
+        nrows = len(theta_vals)
+
+        # column index of phi=0 (or the entry nearest it) in each drawn row
+        zero_idx = {}
+        for t, entries in prows.items():
+            phis = np.array([e[0] for e in entries])
+            zero_idx[t] = int(np.abs(phis).argmin())
+        max_left = max(zero_idx[t] for t in theta_vals)
+        max_right = max(len(prows[t]) - 1 - zero_idx[t] for t in theta_vals)
+        ncols = max_left + max_right + 1
+        center_col = max_left
+
         fig = plt.figure(figsize=(panel * ncols, panel * nrows),
                          facecolor='black')
         norm = plt.Normalize(vmin=0.0, vmax=grad_err_cut)
         cmap = plt.get_cmap(cmap_iso)
+        # scale from all images so cut and full figures share a stretch
         finite = np.concatenate([np.log10(im[im > 0]).ravel() for im in images])
-        vmin_g, vmax_g = np.percentile(finite, [5, 99.5])
-        vmin_g = max(vmin_g, -1)
+        vmin_g, vmax_g = np.percentile(finite, [10, 99.5])
+        #vmin_g = max(vmin_g, -1)
 
         left, right = 0.045, 0.945
         w = (right - left) / ncols
         h = 1.0 / nrows
 
-    for r, t_deg in enumerate(theta_vals):
+    for t_deg in sorted(rows):
         entries = rows[t_deg]
-        i0 = zero_idx[t_deg]
-        if plot:
+        prow = prows.get(t_deg, []) if plot else []
+        # image index -> column slot within the drawn row
+        slot = {i: j for j, (_, i) in enumerate(prow)}
+
+        if plot and prow:
+            r = theta_vals.index(t_deg)
+            i0 = zero_idx[t_deg]
             y_bot = 1.0 - (r + 1) * h
             fig.text(left * 0.6, y_bot + h / 2,
                      rf'$\theta={t_deg:.0f}^\circ$', color='white',
-                     fontsize=13, ha='center', va='center', rotation=90)
+                     fontsize=20, ha='center', va='center', rotation=90)
 
-        for j, (phi_w, i) in enumerate(entries):
+        for phi_w, i in entries:
             img = images[i]
             reff_pix = reffs[i] / kpc_per_pixel
-            eps3, draw = _isophote_eps(isophote_params[i], reff_pix, img.shape,
-                                       kpc_per_pixel, grad_err_cut, grad_err_max)
-            ellipse_dict[orientations[i]] = eps3
-            if not plot:
+
+            requested_kpc = ratios * reffs[i]
+            target_px = (None if target_sma_kpc is None
+                         else requested_kpc / kpc_per_pixel)
+
+            eps, achieved_px, draw = _isophote_eps(
+                isophote_params[i], reff_pix, img.shape, kpc_per_pixel,
+                grad_err_cut, grad_err_max, target_sma_px=target_px)
+
+            achieved_kpc = achieved_px * kpc_per_pixel
+            ellipse_dict[orientations[i]] = {
+                'eps': eps,
+                'r_kpc': achieved_kpc,
+                'r_over_reff': achieved_kpc / reffs[i],
+                'target_ratios': target_reffs
+            }
+
+            if not plot or i not in slot:
                 continue
 
-            c = center_col + (j - i0)  # aligns phi=0 across rows
+            c = center_col + (slot[i] - i0)
             ax = fig.add_axes([left + c * w + col_gap / 2,
                                y_bot + row_gap / 2,
                                w - col_gap, h - row_gap])
             ax.set_facecolor('black')
             ax.axis('off')
+
+            # finite = np.log10(np.where(img > 0,img))
+            # vmin_g, vmax_g = np.percentile(finite, [10, 99])
+            #vmin_g = max(vmin_g, -1)
+
             ax.imshow(np.log10(np.where(img > 0, img, np.nan)),
                       cmap=cmap_img, origin='lower',
                       vmin=vmin_g, vmax=vmax_g, interpolation='nearest')
-            for (x0, y0, sma, eps, pa, ge, ls) in draw:
-                ax.add_patch(Ellipse((x0, y0), 2 * sma, 2 * sma * (1 - eps),
+            for (x0, y0, sma, eps_d, pa, ge, ls) in draw:
+                ax.add_patch(Ellipse((x0, y0), 2 * sma, 2 * sma * (1 - eps_d),
                                      angle=np.degrees(pa),
                                      edgecolor=cmap(norm(ge)), facecolor='none',
-                                     linestyle=ls, linewidth=1.4, alpha=0.95))
+                                     linestyle=ls, linewidth=1, alpha=1))
             ax.set_aspect('equal')
             ax.set_xlim(0, img.shape[1])
             ax.set_ylim(0, img.shape[0])
             ax.text(0.5, 0.97, rf'$\phi={np.degrees(phi_w):+.0f}^\circ$',
-                    transform=ax.transAxes, color='white', fontsize=9,
+                    transform=ax.transAxes, color='white', fontsize=20,
                     ha='center', va='top',
-                    bbox=dict(facecolor='black', alpha=0.4,
-                              edgecolor='none', pad=1.5))
+                    #bbox=dict(facecolor='black', alpha=0.4,
+                              #edgecolor='none', pad=1.5))
+                    )
 
     if plot:
         sm = ScalarMappable(norm=norm, cmap=cmap)
         cax = fig.add_axes([0.958, 0.35, 0.008, 0.3])
-        cb = fig.colorbar(sm, cax=cax)
-        cb.set_label('gradient error', color='white', fontsize=12)
-        cb.ax.tick_params(colors='white')
-        cb.outline.set_edgecolor('white')
+        #cb = fig.colorbar(sm, cax=cax)
+        # cb.set_label('gradient error', color='white', fontsize=12)
+        # cb.ax.tick_params(colors='white')
+        # cb.outline.set_edgecolor('white')
 
         d = os.path.dirname(filename)
         if d:
@@ -1230,32 +1516,32 @@ def plot_isophotes(images, isophote_params, orientations, reffs, rhalf,
         fig.savefig(filename, dpi=dpi, facecolor=fig.get_facecolor())
         plt.close(fig)
 
-
-
     return ellipse_dict
-
 
 def render_bar(current, total, width=30):
     total_safe = max(total, 1)
     frac = min(current / total_safe, 1.0)
     filled = int(width * frac)
     bar = '#' * filled + '-' * (width - filled)
-    return f'[{bar}] {current:>4}/{total} ({frac*100:5.1f}%)'
+    return f'[{bar}] {current:>4}/{total} ({frac * 100:5.1f}%)'
+
 
 def print_progress(started, completed, total, failed=0):
     line1 = f'Started  : {render_bar(started, total)}'
     line2 = f'Completed: {render_bar(completed, total)}' + (f'  ({failed} failed)' if failed else '')
     sys.stdout.write('\033[2A\r\033[K' + line1 + '\n\033[K' + line2 + '\n')
     sys.stdout.flush()
-    
+
+
 def expected_orientation_keys(n_grid):
     """The orientation keys process_halo() will write, without touching a snapshot."""
-    theta_l, phi_l,_, _ = create_spherical_grid(n_grid)
+    theta_l, phi_l, _, _ = create_spherical_grid(n_grid)
     keys = []
     for i in range(n_grid):
         key = f'{i:04d}_t{float(theta_l[i]):+.6f}_p{float(phi_l[i]):+.6f}'
         keys.append(key)
     return keys
+
 
 def missing_orientations(imager, hid, keys):
     return [k for k in keys if not imager.orientation_completed(hid, k)]
@@ -1296,16 +1582,18 @@ def select_halos(sim, sim_name):
 
 
 # ---------------------------------------------------------------------------
-def process_halo_ref(halo_ref, hid, imager, isophote, sim_name, orientation_keys):
+def process_halo_ref(halo_ref, hid, imager, isophote, sim_name, orientation_keys,
+                     shape_profile=None):
     """Returns the ellipse dict for one halo. Loads particle data only if the
     image cache is incomplete."""
     missing = missing_orientations(imager, hid, orientation_keys)
+    print(os.getpid(), os.getppid())
 
     if missing:
         print('  {} / {} orientations missing — loading particle data'.format(
             len(missing), len(orientation_keys)))
         pyn_halo = tangos.get_halo(halo_ref).load()
-        #print(pyn_halo.s.loadable_keys())
+        # print(pyn_halo.s.loadable_keys())
         try:
             imager.run(pyn_halo, hid)
         finally:
@@ -1330,9 +1618,26 @@ def process_halo_ref(halo_ref, hid, imager, isophote, sim_name, orientation_keys
             Rhalf=image_dict['Rhalf'],
         )
 
-        filename = os.path.join(
-            FIGURE_DIR, '{}.{}.isophotes.png'.format(sim_name, hid))
-        print(filename)
+        # Measure the ellipticity at the semi-major axis of the shape shell used as
+        # truth, rather than at multiples of Reff. Falls back to the old 2/2.5/3 Reff
+        # behaviour when no shape profile is available.
+        target_sma_kpc = None
+        # if shape_profile is not None:
+        #     reff_face = face_on_reff(image_dict)
+        #     if np.isfinite(reff_face):
+        #         target_sma_kpc = shape_semi_major(
+        #             shape_profile, SHAPE_RADIUS_REFF * reff_face)
+                # for i in range(len(target_sma_kpc)):
+                    # print('  target sma = {:.4f} kpc ({:.2f} face-on Reff); '
+                    #       'shape shell at {:.2f} Reff'.format(
+                    #     target_sma_kpc[i], target_sma_kpc[i] / reff_face,
+                    #     SHAPE_RADIUS_REFF[i]))
+        if QUAD:
+            filename = os.path.join(
+                FIGURE_DIR, '{}.{}.iso_quadrant.png'.format(sim_name, hid))
+        else:
+            filename = os.path.join(
+                FIGURE_DIR, '{}.{}.isophotes.png'.format(sim_name, hid))
 
         halo_dict = plot_isophotes(
             image_dict['images'],
@@ -1342,10 +1647,12 @@ def process_halo_ref(halo_ref, hid, imager, isophote, sim_name, orientation_keys
             image_dict['Rhalf'],
             filename=filename,
             plot=PLOT,
+            target_sma_kpc=target_sma_kpc,
+            quadrant=QUAD, panel=4.0, dpi=400
         )
     except Exception as e:
         print(f'failed to plot isophotes for {sim_name},{hid}')
-        #trace
+        # trace
         traceback.print_exc()
         sys.exit()
     finally:
@@ -1368,7 +1675,6 @@ def main():
         sim_name = str(sim.basename)
 
         print('\nSimulation {}'.format(sim_name))
-
 
         ellipse_dict.setdefault(sim_name, {})
 
@@ -1400,9 +1706,32 @@ def main():
 
             print('Processing {} halo {} ({} stars)'.format(sim_name, hid, nstar))
 
+            # The 3-D shape profile is left exactly as it is computed elsewhere; it is
+            # only read here to work out which radius the ellipticity should be measured
+            # at. Missing shape -> old behaviour.
+            shape_profile = None
+            # a_s = halo['a_s']
+            # b_s = halo['b_s']
+            # c_s = halo['c_s']
+            # rbins_s = halo['rbins_s']
+            # shape_profile = {'a_s':a_s, 'b_s':b_s, 'c_s':c_s, 'rbins_s':rbins_s}
+
+            # try:
+            #     shape_profile = {k: halo[k]
+            #                      for k in ('a_s', 'b_s', 'c_s', 'rbins_s')}
+            # except Exception:
+            #     try:
+            #         print(f'shape_profile does not match expected format!')
+            #         shape_profile = {k: halo[k]
+            #                          for k in ('ba_s', 'ca_s', 'rbins_s')}
+            #     except Exception:
+            #         print('  no stellar shape for {} halo {} - '
+            #               'falling back to 2/2.5/3 Reff'.format(sim_name, hid))
+
             try:
                 halo_dict = process_halo_ref(halo_ref, hid, imager, isophote,
-                                             sim_name, orientation_keys)
+                                             sim_name, orientation_keys,
+                                             shape_profile=shape_profile)
             except Exception:
                 print('  FAILED on {} halo {}:'.format(sim_name, hid))
                 traceback.print_exc()

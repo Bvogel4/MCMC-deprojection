@@ -23,6 +23,7 @@ Usage
 import argparse
 import os
 import time
+import pickle
 
 import numpy as np
 import matplotlib
@@ -36,22 +37,23 @@ import shape_inference as si
 # --------------------------------------------------------------------------
 # Fiducial CDM model
 # --------------------------------------------------------------------------
-BA = 0.76
-CA = 0.40
-SIGMA_B = 0.11
+BA = 0.819
+CA = 0.35
+SIGMA_B = 0.068
 SIGMA_C = 0.13
 
 # --------------------------------------------------------------------------
 # Grid: 10 x 10 = 100 points
 # --------------------------------------------------------------------------
-N_GRID = np.unique(np.logspace(np.log10(10), np.log10(5000), 8).astype(int))
-MOD_GRID = np.linspace(0.05, 0.40, 10)
+N_GRID = np.unique(np.logspace(np.log10(10), np.log10(5000), 5).astype(int))
+MOD_GRID = np.linspace(0.1, 0.40, 5)
+
 
 # Statistics stage: repeat each grid point to beat down realization noise
-N_REALIZATIONS = 50
+N_REALIZATIONS = 1
 
 # MCMC stage
-N_STEPS = 1000
+N_STEPS = 200
 CA_INDEX = 1          # index of ca in the parameter vector (ba, ca, sig_b, sig_c)
 # ca + modifier must stay below b/a, otherwise c > b and the ellipsoid is not a
 # valid oblate/triaxial shape. With ba=0.76, ca=0.40 the largest usable
@@ -68,20 +70,24 @@ MCMC_DIR = os.path.join(OUT, "mcmc_SIDM_runs")
 # helpers
 # --------------------------------------------------------------------------
 
-def make_q(n, ba, ca, sigma_b, sigma_c):
+def make_q(n, ba, ca, sigma_b, sigma_c,rng):
     """Intrinsic shapes -> one random projection each -> axis ratios q."""
-    B, C = si.generate_ellipsoid_distribution(n, ba, ca, sigma_b, sigma_c)
-    q = si.generate_projections_from_distribution(B, C, 1)
+    B, C,_ ,_= si.generate_ellipsoid_distribution([ba, ca, sigma_b, sigma_c],n ,rng)
+    phi,theta = si.random_viewing_angles(n)
+    alpha, beta = si.projected_semi_axes(phi, theta, B, C)
+    q = beta / alpha
     return np.asarray(q).ravel()
 
 
 def load_cached(prefix, out_dir):
     """Return a previous run's results dict, or None if it isn't on disk yet."""
     try:
-        res = si.load_results(prefix, output_dir=out_dir)
+        with open(f"{out_dir}/{prefix}_results.pkl", 'rb') as f:
+            results = pickle.load(f)
+        return results
     except:
         return None
-    return res if res else None
+
 
 
 def ca_summary(res):
@@ -180,10 +186,11 @@ def run_mcmc(seed=7):
         d = os.path.join(MCMC_DIR, prefix)
         res = load_cached(prefix, d)
         if res is None:
-            q = make_q(n, BA, CA, SIGMA_B, SIGMA_C)
+            q = make_q(n, BA, CA, SIGMA_B, SIGMA_C,rng)
             t0 = time.time()
-            si.infer_intrinsic_shape(q, n_steps=N_STEPS,
-                                     output_prefix=prefix, output_dir=d)
+            res = si.infer_intrinsic_shape(q, n_steps=N_STEPS,
+                                     output_prefix=prefix, output_dir=d, burn_in=int(N_STEPS/2),
+                                     n_cores=32)
             print(f"  CDM N={n}: {time.time() - t0:.0f}s", flush=True)
             res = load_cached(prefix, d)
         else:
@@ -201,10 +208,11 @@ def run_mcmc(seed=7):
             d = os.path.join(MCMC_DIR, prefix)
             res = load_cached(prefix, d)
             if res is None:
-                q = make_q(n, BA, ca_s, SIGMA_B, SIGMA_C)
+                q = make_q(n, BA, ca_s, SIGMA_B, SIGMA_C,rng)
                 t0 = time.time()
                 si.infer_intrinsic_shape(q, n_steps=N_STEPS,
-                                         output_prefix=prefix, output_dir=d)
+                                         output_prefix=prefix, output_dir=d,burn_in=int(N_STEPS/2),
+                                         n_cores=32)
                 print(f"  SIDM N={n} mod={mod:.3f}: "
                       f"{time.time() - t0:.0f}s", flush=True)
                 res = load_cached(prefix, d)

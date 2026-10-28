@@ -1885,6 +1885,71 @@ class StarFormationProfile(PynbodyPropertyCalculation):
 
 
 
+def half_mass_r(sim, cylindrical=False):
+    '''Calculate half-light radius
+
+    Calculates entire luminosity of the provided snapshot, finds half that, sorts
+    stars by distance from halo center, and finds out inside which radius the half luminosity
+    is reached.
+
+    Parameters
+    ----------
+
+    sim : pynbody.SimSnap
+        Halo (or other subsnap, or even a whole simulation) for which to calculate the half-light radius.
+        Any non-star particles are ignored.
+
+    band : str
+        Bandpass name. Can be any that is defined in the SSP table. See the module documentation
+        (:mod:`pynbody.analysis.luminosity`).
+
+    cylindrical : bool
+        If True, the radius is calculated in the cylindrical xy-plane coordinates.
+
+    '''
+    half_m = np.sum(sim.star['mass'])*0.5
+    from pynbody import filt
+
+    if cylindrical:
+        coord = 'rxy'
+    else:
+        coord = 'r'
+    max_high_r = np.max(sim.star[coord])
+    test_r = 0.5 * max_high_r
+    testrf = filt.LowPass(coord, test_r)
+    min_low_r = 0.0
+
+    test_l = np.sum(sim[testrf]['mass'])*0.5
+    it = 0
+    while ((np.abs(test_l - half_m) / half_m) > 0.01):
+        it = it + 1
+        if (it > 20):
+            break
+
+        if (test_l > half_m):
+            test_r = 0.5 * (min_low_r + test_r)
+        else:
+            test_r = (test_r + max_high_r) * 0.5
+        testrf = filt.LowPass(coord, test_r)
+        test_l = np.sum(sim[testrf]['mass'])*0.5
+
+        if (test_l > half_m):
+            max_high_r = test_r
+        else:
+            min_low_r = test_r
+
+    return test_r
+
+class Corotation(PynbodyPropertyCalculation):
+    names = 'corotation'
+
+    def calculate(self, halo, existing_properties):
+        pynbody.analysis.angmom.faceon(halo)
+        rhalf = half_mass_r(halo)
+        #rotation axis is now in the z direction
+        # Kco = 1/K sum_{ri<2_1/2} [ Lzi/(mi*RI)]^2
+
+        #total stellar kinetic energy within 2*rhalf
 
 
 

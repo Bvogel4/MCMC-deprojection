@@ -7,7 +7,7 @@ import pandas as pd
 import traceback
 from scipy import stats
 import matplotlib.pyplot as plt
-from galaxy_ellipse_collection import GalaxyEllipseCollection, SyntheticEllipseCollection
+from galaxy_ellipse_collection import GalaxyEllipseCollection, SyntheticEllipseCollection,get_keys
 from glob import glob
 
 #load configs
@@ -20,27 +20,32 @@ import tangos
 
 tangos_sims = tangos.all_simulations()
 
-band = 'v'
-image_type = 'stars'
-radius = 2.5  # in Reff
-reff_index = 1
+band_key = '' #use none for mass based stellar shape
+# image_type = 'stars'
+# radius_list = [2,3,4] # in Reff
+# indices = [0,1,2]
+radius_list = [2] # in Reff
+indices = [0]
 
 # Configuration parameters (added from test code)
 RANDOM_SEED = 14
 np.random.seed(RANDOM_SEED)
 
 # MCMC parameters (added from test code)
-N_STEPS = 500  # Number of MCMC steps
+N_STEPS = 3000 # Number of MCMC steps
 BURN_IN = int(N_STEPS*3/4) # Number of burn-in steps to discard
 N_CORES = 32 # Number of CPU cores to use for parallel processing
 N_WALKERS = 64  # Number of MCMC walkers
-N_ANGLES_PER_HALO = 2000  # Number of angles to sample for each halo
-N_ANGLES_PER_HALO_ALL = 1000 # Number of angles to sample for each halo when running all combined
+N_ANGLES_PER_HALO = 1000  # Number of angles to sample for each halo
+N_ANGLES_PER_HALO_ALL = 200 # Number of angles to sample for each halo when running all combined
+N_BOOTSTRAP = 1000
 
 # Set force_rerun to False to use existing results if available
 test = False
 force_rerun = False
 Klein_comparison = False
+RUN_CONVARIANCE=True
+CONTAIN=False
 
 # Disky/Non-disky classification thresholds
 BA_THRESHOLD = 0.65
@@ -183,51 +188,29 @@ def load_and_process_halo_data(pickle_filename, sim_name=None, halo_id=None):
 
     return ellipse_dict[sim_name][halo_id]
 
-def get_keys(simname, hid, orientation_coords, keys, cachedir='caches'):
-
-    """
-    Pull one or more keys out of a cached face-on/oriented image dict.
-
-    simname            : e.g. 'r431.romulus25.3072g1HsbBH'
-    hid                : halo id
-    orientation_coords : (theta, phi)
-    keys               : str or list of str
-    """
-    t, p = orientation_coords
-    pattern = (f'{cachedir}/vband_cache_{simname}_n100/'
-               f'VBandStarImages_halo{hid}/*_t{t:+f}_p{p:+f}.pkl')
-
-    matches = glob(pattern)
-    if not matches:
-        raise FileNotFoundError(f'No cache file matching {pattern}')
-
-    with open(matches[0], 'rb') as f:
-        d = pickle.load(f)
-
-    if isinstance(keys, str):
-        return d[keys]
-    return [d[k] for k in keys]
 
 
-def run_all_individual_halos(galaxy_collection, n_angles=1000, reff_index=0, force_rerun=False, output_suffix=""):
+
+def run_all_individual_halos(galaxy_collection, n_angles=1000, force_rerun=False, output_suffix=""):
     """Run inference on each halo individually and collect results."""
     print(f"\nRunning inference for each halo separately{' (' + output_suffix + ')' if output_suffix else ''}...")
 
     results = {}
     summary_data = []
+    radius=galaxy_collection.radius
 
     # Save summary as CSV
-    summary_dir = Path("results/summary")
+    summary_dir = Path("Marvel.DC.results/summary")
     summary_dir.mkdir(exist_ok=True)
 
     for sim_name, halo_id in galaxy_collection.get_all_halo_keys():
         print(f"Processing halo {halo_id} from simulation {sim_name}...")
         try:
-            samples, max_prob_params, sampler, q_obs = galaxy_collection.run_inference_single_halo(
+            samples, max_prob_params, sampler, q_obs, a_s, ba_s, ca_s = galaxy_collection.run_inference_single_halo(
                 sim_name, halo_id,
                 n_steps=N_STEPS, n_walkers=N_WALKERS, burn_in=BURN_IN,
                 n_cores=N_CORES,
-                output_dir=f'results/single_halos/{sim_name}_{halo_id}_{reff_index}{("_" + output_suffix) if output_suffix else ""}',
+                output_dir=f'Marvel.DC.results/single_halos/{sim_name}_h{halo_id}_r{radius}{("_" + output_suffix) if output_suffix else ""}',
                 force_rerun=force_rerun, n_angles=n_angles
             )
 
@@ -236,7 +219,10 @@ def run_all_individual_halos(galaxy_collection, n_angles=1000, reff_index=0, for
                 'samples': samples,
                 'max_prob_params': max_prob_params,
                 'q_obs': q_obs,
-                'sampler': sampler
+                'sampler': sampler,
+                'a_s': a_s,
+                'ba_s': ba_s,
+                'ca_s': ca_s,
             }
 
             # Add to summary data for CSV
@@ -257,11 +243,14 @@ def run_all_individual_halos(galaxy_collection, n_angles=1000, reff_index=0, for
                 "σB Std": std_params[2],
                 "Inferred σC": max_prob_params[3],
                 "σC Mean": mean_params[3],
-                "σC Std": std_params[3]
+                "σC Std": std_params[3],
+                "True B/A": ba_s,
+                "True C/A": ca_s,
+
             })
 
             # Save the results to a file
-            output_filename = f"all_individual_results_3Reff{('_' + output_suffix) if output_suffix else ''}.pkl"
+            output_filename = f"all_individual_results_{radius}Reff{('_' + output_suffix) if output_suffix else ''}.pkl"
             with open(summary_dir / output_filename, 'wb') as f:
                 pickle.dump(results, f)
 
@@ -269,7 +258,7 @@ def run_all_individual_halos(galaxy_collection, n_angles=1000, reff_index=0, for
             print(f"Error processing halo {halo_id} from {sim_name}: {e}")
 
     summary_df = pd.DataFrame(summary_data)
-    csv_filename = f"all_halos_summary{('_' + output_suffix) if output_suffix else ''}.csv"
+    csv_filename = f"all_halos_summary{radius}Reff{('_' + output_suffix) if output_suffix else ''}.csv"
     summary_df.to_csv(summary_dir / csv_filename, index=False)
 
     return results
@@ -405,13 +394,33 @@ def run_inference_batch(collection_specs, inference_kwargs, results_output_direc
 
         subdir = label.lower().replace(' ', '_')
         #samples, max_params, sampler, q_obs =
-        collection.run_inference_all_halos(
+        radius = collection.radius
+        true_params,true_params_cov, max_prob_params, max_prob_params_cov, = collection.run_inference_all_halos(
             **inference_kwargs,
             force_rerun=force_rerun,
-            output_dir=f"{results_output_directory}/{subdir}",
+            output_dir=f"{results_output_directory}/{subdir}.radius{radius}.contained.{CONTAIN}",
             output_prefix=subdir,
             label=label,
             color=spec['color'],
+            contain=CONTAIN
+        )
+        print("inference_kwargs keys:", sorted(inference_kwargs))
+        print("reference_dir in kwargs:   ", inference_kwargs.get('reference_dir'))
+        print("reference_prefix in kwargs:", inference_kwargs.get('reference_prefix'))
+        collection.run_bootstrap_inference(
+            output_dir=f"{results_output_directory}/{subdir}.radius{radius}.contained.{CONTAIN}",
+            n_bootstrap = N_BOOTSTRAP,
+            **inference_kwargs,
+            n_workers=10,
+            force_rerun=force_rerun,
+            output_prefix=subdir,
+            label=label,
+            color=spec['color'],
+            contain=CONTAIN,
+            true_params=true_params,
+            true_params_cov=true_params_cov,
+            max_prob_params=max_prob_params,
+            max_prob_params_cov=max_prob_params_cov,
         )
 
         # create_summary_table(
@@ -531,134 +540,300 @@ def plot_klein_comparisons(klein_collections, klein_data, results_output_directo
             )
 
 
-if __name__ == "__main__":
-    print("3D Shape Inference from Galaxy Ellipse Data")
-    print("===========================================")
-    print(f"Random seed: {RANDOM_SEED}")
-    print(f"MCMC: {N_WALKERS} walkers, {N_STEPS} steps, {BURN_IN} burn-in, {N_CORES} cores")
+"""
+Refactored main block: all radius-independent work (tangos queries, pickle load,
+shape splines, stellar masses, load_and_process_halo_data) happens ONCE.
+The per-radius loop only evaluates the splines and rebuilds the collections,
+so the interfaces used downstream are unchanged:
+
+    GalaxyEllipseCollection(reff_index=..., run_covariances=...)
+    run_all_individual_halos(collection, radius, force_rerun=...)
+    run_inference_batch(built, radius, inference_kwargs, results_output_directory, force_rerun)
+"""
+
+import pickle
+import traceback
+
+import numpy as np
+import tangos
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 1 helpers: radius-INDEPENDENT
+# ──────────────────────────────────────────────────────────────────────────────
 
-    # ── Step 1: Load master collection ──────────────────────────────────────
-    galaxy_collection = GalaxyEllipseCollection(reff_index=reff_index, run_covariances=False)
-    halo_metadata = {}   # (sim, hid) -> {ba_s, ca_s, log_stellar_mass}
-    skipped_count = 0
+def _feedback_type(sim):
+    if sim.endswith('sbBH'):
+        return 'sbBH'
+    if sim.endswith('bwK1BH'):
+        return 'bwBH'
+    return None
 
+
+def _select_halo_refs(sim, halo_refs):
+    """Apply the per-simulation halo cuts. Independent of radius."""
+    # Massive Merians (r* sims): keep only the most massive halo
+    if sim.startswith('r') and not sim.startswith('rogue'):
+        max_halo_ref, max_stars = None, 0
+        for halo_ref in halo_refs:
+            try:
+                n_stars = tangos.get_halo(halo_ref)['n_star'][0]
+            except Exception:
+                continue
+            if n_stars > max_stars:
+                max_stars, max_halo_ref = n_stars, halo_ref
+        return [max_halo_ref] if max_halo_ref else []
+
+    # h* sims: skip halo 0
+    if sim.startswith('h'):
+        kept = [hr for hr in halo_refs
+                if tangos.get_halo(hr).basename.split('_')[1] != '0']
+        #print(f'Removing halo 0 from sim {sim}')
+        return kept
+
+    return halo_refs
+
+
+def load_halo_records(pickle_file, test=False):
+    """
+    Do every expensive, radius-independent thing exactly once.
+
+    Returns
+    -------
+    records : list of dict
+        One entry per surviving halo, holding the raw ellipse payload plus the
+        smoothed shape splines so that a_s/b_s/c_s can be evaluated at any radius.
+    skipped : int
+    """
     if test:
         print("testing shapes, will not load galaxies!")
-        ellipse_dict = {}
-    else:
-        with open(pickle_file, 'rb') as f:
-            ellipse_dict = pickle.load(f)
+        return [], 0
+
+    with open(pickle_file, 'rb') as f:
+        ellipse_dict = pickle.load(f)
+
+    records, skipped = [], 0
 
     for sim in ellipse_dict:
-        halo_refs = list(ellipse_dict[sim].keys())
-        #get feedback type if possible
-        feedback_type = None
-        if sim.endswith('sbBH'):
-            feedback_type = 'sbBH'
-        elif sim.endswith('bwK1BH'):
-            feedback_type = 'bwBH'
-
-
-        # --- Filter: Massive Merians (r* sims) — keep only most massive halo ---
-        if sim.startswith('r') and not sim.startswith('rogue'):
-            max_halo_ref, max_stars = None, 0
-            for halo_ref in halo_refs:
-                try:
-                    n_stars = tangos.get_halo(halo_ref)['n_star'][0]
-                    if n_stars > max_stars:
-                        max_stars, max_halo_ref = n_stars, halo_ref
-                except Exception:
-                    continue
-            halo_refs = [max_halo_ref] if max_halo_ref else []
-            print(f'Keeping only most massive halo from sim {sim}')
-
-        # --- Filter: h* sims — skip halo 0 ---
-        elif sim.startswith('h'):
-            halo_refs = [hr for hr in halo_refs
-                         if tangos.get_halo(hr).basename.split('_')[1] != '0']
-            print(f'Removing halo 0 from sim {sim}')
+        halo_refs = _select_halo_refs(sim, list(ellipse_dict[sim].keys()))
+        feedback_type = _feedback_type(sim)
 
         for halo_ref in halo_refs:
             try:
+                halo = tangos.get_halo(halo_ref)
+                hid = halo.basename.split('_')[1]
 
-                halo  = tangos.get_halo(halo_ref)
-                hid   = halo.basename.split('_')[1]
-                #reff  = halo[f'image_reffs_{band}'][0] #replace this line
-                #reff = get_keys(sim,hid,(0,0),'Reff')
+                contaim_frac = halo['contamination_fraction']
+                print(f'{sim}{hid} contamination fraction {contaim_frac:.2g}!')
+                if contaim_frac > 0.02:
+                    print(f'{sim}{hid} contamination fraction exceeds threshold {contaim_frac:.2g}!')
+                    skipped += 1
+                    continue
+                else:
+                    continue
+
+                    # except Exception as e:
+                    #     raise e
+                    print(f'could not read contamination fraction for {sim} {hid}')
+
                 try:
-                    a = halo['a_s']
-                    b = halo['b_s']
-                    c = halo['c_s']
+                    a, b, c = halo['a_s'], halo['b_s'], halo['c_s']
                     rbins = halo['rbins_s']
                 except Exception:
                     print(f'no shape found for {sim} {hid}')
                     continue
+
                 Reff = get_keys(sim, hid, (0.0, 0.0), 'Reff')
 
                 rbins_f, a_f, b_f, c_f, a_s_func, b_s_func, c_s_func = smooth_shape(rbins, a, b, c, k=3)
-                # get a,b,c at 2*reff
-                a_s = a_s_func(radius * Reff)
-                b_s = b_s_func(radius * Reff)
-                c_s = c_s_func(radius * Reff)
-                ba_s = b_s/a_s
-                ca_s = c_s/a_s
 
+                try:
+                    a_i, b_i, c_i = halo['a_s_i'], halo['b_s_i'], halo['c_s_i']
+                    rbins_i = halo['rbins_s_i']
+                except Exception:
+                    print(f'no shape (i) found for {sim} {hid}')
+                    raise Exception
 
-                # if Klein_comparison:
-                #     ba_s, ca_s = halo['ba_s_v'], halo['ca_s_v']
-                # else:
-                #     rbins_s = halo['rbins_s']
-                #     #show a warning if reff is more than 10% larger than largest rbin
-                #     max_r = rbins_s[-1]
-                #     if radius * reff > 1.1* max_r:
-                #         print(f'Warning: {radius}*reff {radius* reff} vs max rbin {rbins_s[-1]} for halo {halo_ref}')
-                #     ba_s  = halo.calculate('ba_s_smoothed()')(radius * reff)
-                #     ca_s  = halo.calculate('ca_s_smoothed()')(radius * reff)
-
+                rbins_i_f, a_i_f, b_i_f, c_i_f, a_i_s_func, b_i_s_func, c_i_s_func = smooth_shape(rbins_i, a_i, b_i, c_i, k=3)
                 try:
                     stellar_mass = halo['M_star']
                 except KeyError:
                     stellar_mass = halo['finder_star_mass']
+                log_stellar_mass = np.log10(extract_single_value(stellar_mass))
 
-                stellar_mass    = extract_single_value(stellar_mass)
-                log_stellar_mass = np.log10(stellar_mass)
-
-                assert 0 <= ba_s <= 1
-                assert 0 <= ca_s <= 1
+                # The heavy ellipse payload — also radius-independent.
+                halo_data = load_and_process_halo_data(pickle_file, sim, halo_ref)
 
             except Exception as e:
-                print(f"\nError loading halo from {sim} {halo}: {e}")
+                print(f"\nError loading halo from {sim} {halo_ref}: {e}")
                 traceback.print_exc()
-                skipped_count += 1
+                skipped += 1
                 continue
 
-            halo_data = load_and_process_halo_data(pickle_file, sim, halo_ref)
-            halo_data['a_s'], halo_data['ba_s'], halo_data['ca_s'] = a_s, ba_s, ca_s
-            
-            try:
-                galaxy_collection.add_halo(
-                    sim_name=sim, halo_id=hid, halo_data=halo_data,
-                    interpolation_method='linear',
-                    coordinate_system='angles'
-                )
-            except Exception as e:
-                print(f"\nError loading galaxy {sim} {halo}: {e}")
-                skipped_count += 1
-                continue
+            records.append({
+                'sim': sim,
+                'hid': hid,
+                'halo_ref': halo_ref,
+                'halo_data': halo_data,
+                'a_s_func': a_s_func,
+                'b_s_func': b_s_func,
+                'c_s_func': c_s_func,
+                'rbins': rbins,
+                'Reff': Reff,
+                'a_s_i_func': a_i_s_func,
+                'b_s_i_func': b_i_s_func,
+                'c_s_i_func': c_i_s_func,
+                'rbins_i': rbins_i,
 
-            halo_metadata[(sim, hid)] = {'ba_s': ba_s, 'ca_s': ca_s, 'log_stellar_mass': log_stellar_mass, 'feedback_type': feedback_type}
+                'max_rbin': float(np.max(rbins)),
+                'log_stellar_mass': log_stellar_mass,
+                'feedback_type': feedback_type,
+            })
+    sys.exit()
+    return records, skipped
 
-    print(f"\nLoaded {galaxy_collection.get_halo_count()} halos, skipped {skipped_count}.")
 
-    # ── Step 2: Build sub-collections ───────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 2 helper: radius-DEPENDENT (cheap — just spline evaluations)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def build_master_collection(records, radius, reff_index, run_covariances,
+                            warn_extrapolation=True):
+    """Evaluate the shape splines at `radius * Reff` and fill a fresh collection."""
+    galaxy_collection = GalaxyEllipseCollection(radius=radius, reff_index=reff_index,
+                                                run_covariances=run_covariances,band_key=band_key)
+    halo_metadata = {}
+    skipped = 0
+
+    for rec in records:
+        sim, hid = rec['sim'], rec['hid']
+        r = radius * rec['Reff']
+        # try:
+
+
+        if warn_extrapolation and r > 1.5 * rec['max_rbin']:
+            print(f'Warning: {radius}*Reff = {r:.3g} vs max rbin '
+                  f'{rec["max_rbin"]:.3g} for {sim} {hid}')
+
+        try:
+            a_s = rec['a_s_func']
+            b_s = rec['b_s_func']
+            c_s = rec['c_s_func']
+            rbins= rec['rbins']
+            Reff = rec['Reff']
+            ba_s, ca_s = b_s(Reff*radius) / a_s(Reff*radius) , c_s(Reff*radius)  / a_s(Reff*radius) 
+
+            # if not (0 <= ba_s <= 1 and 0 <= ca_s <= 1):
+            #     raise ValueError(f'axis ratios out of range: ba={ba_s}, ca={ca_s}')
+        except Exception as e:
+            print(f"\nError evaluating shape for {sim} {hid} at {radius}*Reff: {e}")
+            skipped += 1
+            continue
+        try:
+            a_s_i = rec['a_s_i_func']
+            b_s_i = rec['b_s_i_func']
+            c_s_i = rec['c_s_i_func']
+            rbins_i= rec['rbins_i']
+            ba_s_i, ca_s_i = b_s_i(Reff*radius) / a_s_i(Reff*radius) , c_s_i(Reff*radius)  / a_s_i(Reff*radius)
+
+            # if not (0 <= ba_s <= 1 and 0 <= ca_s <= 1):
+            #     raise ValueError(f'axis ratios out of range: ba={ba_s}, ca={ca_s}')
+        except Exception as e:
+            print(f"\nError evaluating shape for {sim} {hid} at {radius}*Reff: {e}")
+            raise Exception
+
+        # Shallow copy so per-radius shape values never leak between iterations.
+        halo_data = dict(rec['halo_data'])
+        halo_data['a_s'], halo_data['b_s'], halo_data['c_s'], halo_data['rbins'] = a_s, b_s, c_s, rbins
+        halo_data['a_s_i'], halo_data['b_s_i'], halo_data['c_s_i'],halo_data['rbins_i'] = a_s_i, b_s_i, c_s_i, rbins_i
+
+
+
+        try:
+            galaxy_collection.add_halo(
+                sim_name=sim, halo_id=hid, halo_data=halo_data
+            )
+        except AssertionError as e:
+            print(f"\nError loading galaxy {sim} {hid}: {e}")
+            skipped += 1
+            continue
+        except Exception as e:
+            print(f"\nError loading galaxy {sim} {hid}: {e}")
+            traceback.print_exc()
+            skipped += 1
+            continue
+
+        halo_metadata[(sim, hid)] = {
+            'ba_s': ba_s,
+            'ca_s': ca_s,
+            'ba_s_i': ba_s_i,
+            'ca_s_i': ca_s_i,
+            'log_stellar_mass': rec['log_stellar_mass'],
+            'feedback_type': rec['feedback_type'],
+        }
+    return galaxy_collection, halo_metadata, skipped
+
+
+def make_collection_specs(radius,reff_index,run_covariances):
+    """Fresh (empty) collections every call — build_collections fills them."""
     mb = MASS_BINS
+    kwargs = dict(radius=radius,reff_index=reff_index,run_covariances=run_covariances,band_key=band_key)
+    return [
+        {'label': 'All galaxies',
+         'collection': GalaxyEllipseCollection(**kwargs),
+         'color': 'green',
+         'predicate': lambda m: True},
 
-    synthetic_specs = [
+        {'label': r"M$_* < 10^8 \text{M}_{\odot}$",
+         'collection': GalaxyEllipseCollection(**kwargs),
+         'color': 'red',
+         'predicate': lambda m: 4 <= (m['log_stellar_mass'] - np.log10(0.6)) < 8},
+        {'label': r"M$_* > 10^8 \text{M}_{\odot}$",
+         'collection': GalaxyEllipseCollection(**kwargs),
+         'color': 'blue',
+         'predicate': lambda m: 8 <= m['log_stellar_mass'] < 12},
+        #
+        # {'label': 'KF Low Mass',
+        #  'collection': GalaxyEllipseCollection(**kwargs),
+        #  'color': 'red',
+        #  'predicate': lambda m: mb['KF_low'][0] <= (m['log_stellar_mass'] - np.log10(0.6)) < mb['KF_low'][1]},
+        #
+        # {'label': 'KF Medium Mass',
+        #  'collection': GalaxyEllipseCollection(**kwargs),
+        #  'color': 'blue',
+        #  'predicate': lambda m: mb['KF_med'][0] <= (m['log_stellar_mass'] - np.log10(0.6)) < mb['KF_med'][1]},
+        #
+        # {'label': 'KF High Mass',
+        #  'collection': GalaxyEllipseCollection(**kwargs),
+        #  'color': 'purple',
+        #  'predicate': lambda m: mb['KF_high'][0] <= (m['log_stellar_mass'] - np.log10(0.6)) < mb['KF_high'][1]},
+        #
+        # {'label': 'Disky',
+        #  'collection': GalaxyEllipseCollection(**kwargs),
+        #  'color': 'orange',
+        #  'predicate': lambda m: m['ba_s'] > BA_THRESHOLD and m['ca_s'] < CA_THRESHOLD},
+        #
+        # {'label': 'Non-disky',
+        #  'collection': GalaxyEllipseCollection(**kwargs),
+        #  'color': 'purple',
+        #  'predicate': lambda m: not (m['ba_s'] > BA_THRESHOLD and m['ca_s'] < CA_THRESHOLD)},
+
+
+        # ── kept for reference ───────────────────────────────────────────────
+        # {'label': 'Superbubble', ..., 'predicate': lambda m: m['feedback_type'] == 'sbBH'},
+        # {'label': 'Blastwave',   ..., 'predicate': lambda m: m['feedback_type'] == 'bwBH'},
+        # {'label': 'Klein_low',   ..., 'predicate': lambda m: 8 <= m['log_stellar_mass'] < 9},
+        # {'label': 'Klein_med',   ..., 'predicate': lambda m: 9 <= m['log_stellar_mass'] < 10},
+        # {'label': 'Disky',       ..., 'predicate': lambda m: m['ba_s'] > BA_THRESHOLD and m['ca_s'] < CA_THRESHOLD},
+        # {'label': 'Non-disky',   ..., 'predicate': lambda m: not (m['ba_s'] > BA_THRESHOLD and m['ca_s'] < CA_THRESHOLD)},
+    ]
+
+
+def make_synthetic_specs():
+    return [
         {'label': f"Synthetic: {meta['label']}",
          'collection': SyntheticEllipseCollection(
-             kado_fong_param_vector(key,rho_ac=-0.5,sigma_ba=0.13, sigma_ca=0.17),
+             kado_fong_param_vector(key, rho_ac=-0.5, sigma_ba=0.13, sigma_ca=0.17),
              n_ellipsoids=200,
              run_covariances=False,
              sim_name=f"synthetic_{key}"),
@@ -666,101 +841,82 @@ if __name__ == "__main__":
          'predicate': lambda m: False}
         for key, meta in KADO_FONG_SHAPES.items()
     ]
-    
-    collection_specs = [
-        {'label': 'All galaxies', 'collection': GalaxyEllipseCollection(run_covariances=True), 'color': 'green',
-         'predicate': lambda m: True},
-        # {'label': 'Superbubble', 'collection': GalaxyEllipseCollection(), 'color': 'red',
-        #  'predicate': lambda m: m['feedback_type']=='sbBH'},
-        # {'label': 'Blastwave', 'collection': GalaxyEllipseCollection(), 'color': 'blue',
-        #  'predicate': lambda m: m['feedback_type'] == 'bwBH'},
-        #
-        # {'label': 'Klein_low_sb',    'collection': GalaxyEllipseCollection(), 'color': 'blue',
-        #  'predicate': lambda m: (8 <= m['log_stellar_mass'] < 9 and m['feedback_type']=='sbBH')},
-        # {'label': 'Klein_med_sb',    'collection': GalaxyEllipseCollection(), 'color': 'blue',
-        #  'predicate': lambda m: (9 <= m['log_stellar_mass'] < 10 and m['feedback_type']=='sbBH')},
-        #
-        # {'label': 'Klein_low_bw',    'collection': GalaxyEllipseCollection(), 'color': 'red',
-        #  'predicate': lambda m: (8 <= m['log_stellar_mass'] < 9 and m['feedback_type']=='bwBH')},
-        # {'label': 'Klein_med_bw',    'collection': GalaxyEllipseCollection(), 'color': 'red',
-        #  'predicate': lambda m: (9 <= m['log_stellar_mass'] < 10 and m['feedback_type']=='bwBH')},
-
-        # {'label': 'All galaxies', 'collection': GalaxyEllipseCollection(), 'color': 'green',
-        #  'predicate': lambda m: True},
-        # {'label': r"M$_* < 10^8 \text{M}_{\odot}$",      'collection': GalaxyEllipseCollection(), 'color': 'red',
-        #  'predicate': lambda m: 4 <= (m['log_stellar_mass'] - np.log10(0.6))  < 8},
-
-        # {'label': 'Disky',        'collection': GalaxyEllipseCollection(), 'color': 'blue',
-        #  'predicate': lambda m: m['ba_s'] > BA_THRESHOLD and m['ca_s'] < CA_THRESHOLD},
-        # {'label': 'Non-disky',    'collection': GalaxyEllipseCollection(), 'color': 'red',
-        #  'predicate': lambda m: not (m['ba_s'] > BA_THRESHOLD and m['ca_s'] < CA_THRESHOLD)},
-        # {'label': 'KF Low Mass',       'collection': GalaxyEllipseCollection(), 'color': 'red',
-        #  'predicate': lambda m: mb['KF_low'][0] <= (m['log_stellar_mass'] - np.log10(0.6)) < mb['KF_low'][1]},
-        # {'label': 'KF Medium Mass',       'collection': GalaxyEllipseCollection(), 'color': 'blue',
-        #  'predicate': lambda m: mb['KF_med'][0] <= (m['log_stellar_mass'] - np.log10(0.6)) < mb['KF_med'][1]},
-        #
-        #run our covariances last:
-        # {'label': r"M$_* > 10^8 \text{M}_{\odot}$", 'collection': GalaxyEllipseCollection(run_covariances=False),
-        #  'color': 'blue',
-        #  'predicate': lambda m: 8 <= m['log_stellar_mass'] < 12},
-        # {'label': 'KF High Mass', 'collection': GalaxyEllipseCollection(run_covariances=False), 'color': 'green',
-        #  'predicate': lambda m: mb['KF_high'][0] <= (m['log_stellar_mass'] - np.log10(0.6)) < mb['KF_high'][1]},
 
 
-        # {'label': 'Klein_low',    'collection': GalaxyEllipseCollection(), 'color': 'blue',
-        #  'predicate': lambda m: 8 <= m['log_stellar_mass'] < 9},
-        # {'label': 'Klein_med',    'collection': GalaxyEllipseCollection(), 'color': 'blue',
-        #  'predicate': lambda m: 9 <= m['log_stellar_mass'] < 10},
-    ]
+# ──────────────────────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────────────────────
 
-    # Skip disky/non-disky when doing Klein comparison
+if __name__ == "__main__":
+    print("3D Shape Inference from Galaxy Ellipse Data")
+    print("===========================================")
+    print(f"Random seed: {RANDOM_SEED}")
+    print(f"MCMC: {N_WALKERS} walkers, {N_STEPS} steps, {BURN_IN} burn-in, {N_CORES} cores")
 
+    # ── Step 0: load everything radius-independent, once ─────────────────────
+    records, load_skipped = load_halo_records(pickle_file, test=test)
+    print(f"\nLoaded {len(records)} halo records, skipped {load_skipped}.")
 
-    if Klein_comparison:
-        collection_specs = [s for s in collection_specs if s['label'] not in ('Disky', 'Non-disky')]
-    if test:
-        built = build_collections(galaxy_collection, halo_metadata, synthetic_specs)
-    else:
-        built = build_collections(galaxy_collection, halo_metadata, collection_specs)
-    # use to run all halos individually
-    # for label, spec in built.items():
-    #     collection = spec['collection']
-    #     print(f'Running individual halos')
-    #     run_all_individual_halos(collection,force_rerun=force_rerun)
-    # sys.exit()
+    # for reff_index, radius in enumerate(radius_list):
+    for i in range(len(radius_list)):
+        radius = radius_list[i]
+        reff_index = indices[i]
 
-    for label, info in built.items():
-        print(f"  {label}: {info['count']} halos")
+        print(f"\n=== radius = {radius} Reff (reff_index={reff_index}) ===")
 
-    # ── Step 3 (optional): Klein comparison plots ────────────────────────────
-    if Klein_comparison:
-        import Kleindata
-        plot_klein_comparisons(
-            klein_collections={'low': built['Klein_low']['collection'],
-                                'med': built['Klein_med']['collection']},
-
-            # klein_collections={'Superbubble': built['Superbubble']['collection'], 'Blastwave': built['Blastwave']['collection'],
-            #                    },
-            klein_data=Kleindata,
-            results_output_directory=results_output_directory,
+        # ── Step 1: cheap per-radius rebuild ─────────────────────────────────
+        galaxy_collection, halo_metadata, skipped_count = build_master_collection(
+            records, radius, reff_index, RUN_CONVARIANCE
         )
+        print(f"Collection has {galaxy_collection.get_halo_count()} halos, "
+              f"skipped {skipped_count} at this radius.")
 
-    # ── Step 4: Run inference on all collections ─────────────────────────────
-    inference_kwargs = dict(
-        n_steps=N_STEPS, n_walkers=N_WALKERS, burn_in=BURN_IN,
-        n_cores=N_CORES, n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
-    )
-    # inference_results = (
-    run_inference_batch(built, inference_kwargs, results_output_directory, force_rerun)
+        # ── Step 2: build sub-collections ────────────────────────────────────
+        if test:
+            built = build_collections(galaxy_collection, halo_metadata,
+                                      make_synthetic_specs())
+        else:
+            specs = make_collection_specs(radius,reff_index,RUN_CONVARIANCE)
+            if Klein_comparison:
+                specs = [s for s in specs if s['label'] not in ('Disky', 'Non-disky')]
+            built = build_collections(galaxy_collection, halo_metadata, specs)
 
-    # # ── Step 5: Comparison summary ───────────────────────────────────────────
-    # comparison_df = build_comparison_df(
-    #     inference_results,
-    #     output_path=results_output_directory + '/summary/category_comparison.csv'
-    # )
-    # print("\nComparison Summary:")
-    # print(comparison_df.to_string(index=False))
-    # print("\nAnalysis completed successfully!")
+        for label, info in built.items():
+            print(f"  {label}: {info['count']} halos")
 
+
+
+        # ── Step 3 (optional): Klein comparison plots ────────────────────────
+        if Klein_comparison:
+            import Kleindata
+            plot_klein_comparisons(
+                klein_collections={'low': built['Klein_low']['collection'],
+                                   'med': built['Klein_med']['collection']},
+                klein_data=Kleindata,
+                results_output_directory=results_output_directory,
+            )
+
+        # ── Step 4: run inference on all collections ─────────────────────────
+        inference_kwargs = dict(
+            n_steps=N_STEPS, n_walkers=N_WALKERS, burn_in=BURN_IN,
+            n_cores=N_CORES, n_angles_per_halo=N_ANGLES_PER_HALO_ALL,
+        )
+        run_inference_batch(built, inference_kwargs,
+                            results_output_directory, force_rerun)
+
+
+        # use to run all halos individually
+        # for label, spec in built.items():
+        #     print('Running individual halos')
+        #     run_all_individual_halos(spec['collection'], radius, force_rerun=force_rerun)
+        # sys.exit()
+
+        # ── Step 5: comparison summary ───────────────────────────────────────
+        # comparison_df = build_comparison_df(
+        #     inference_results,
+        #     output_path=results_output_directory + '/summary/category_comparison.csv'
+        # )
+        # print("\nComparison Summary:")
+        # print(comparison_df.to_string(index=False))
 
 

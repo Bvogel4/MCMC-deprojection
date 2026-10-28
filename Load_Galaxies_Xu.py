@@ -34,6 +34,7 @@ warnings.filterwarnings("ignore")
 
 import sys
 from config import db_connection, sys_path, xu_output_dir, pickle_file
+pickle_file = '/home/bk639/MCMC-deprojection/angle_test_tangos/ellipse_data_n_100.pickle'
 
 os.environ['TANGOS_DB_CONNECTION'] =  '/home/bk639/data_base/CDM_all_shapes.db'#db_connection
 os.environ['TANGOS_PROPERTY_MODULES'] = 'mytangosproperty'
@@ -78,9 +79,14 @@ class GalaxyData:
     environment: str  # 'central', 'satellite', 'backsplash'
     ellipticity_interpolator: callable
     surface_brightness_interpolator: callable
-    shape_b_over_a: callable  # 3D shape parameter b/a
-    shape_c_over_a: callable  # 3D shape parameter c/a
+    a: float  # 3D shape parameter a
+    b: float  # 3D shape parameter b
+    c: float  # 3D shape parameter b
+    a_i: float
+    b_i: float
+    c_i: float
     reff: float
+    rho: float
 
 
 @dataclass
@@ -219,42 +225,42 @@ def load_observational_data(xu_folder: str) -> Tuple[ObservationData, ...]:
 
     return obs_data, fire_data, xu_dim, xu_bright
 
-
-def SB_integrated(r_bins, profile_lum_den_v):
-    """
-    Integrate luminosity density profile to get total luminosity.
-
-    Parameters:
-    -----------
-    r_bins : array
-        Radial bin edges
-    profile_lum_den_v : array
-        Luminosity density in each bin
-
-    Returns:
-    --------
-    total_lum : float
-        Total integrated luminosity
-    """
-    # Add 0 at the beginning of r_bins to include the innermost bin
-    r_bins_extended = np.insert(r_bins, 0, 0)
-
-    # Calculate annular area for each bin
-    # Area of annulus = π * (r_outer² - r_inner²)
-    r_inner = r_bins_extended[:-1]
-    r_outer = r_bins_extended[1:]
-
-    areas = np.pi * (r_outer ** 2 - r_inner ** 2)
-
-    # remove nans
-    nanmask = np.isnan(profile_lum_den_v)
-    profile_lum_den_v = profile_lum_den_v[~nanmask]
-    areas = areas[~nanmask]
-
-    # Total luminosity = sum of (luminosity density × area)
-    total_lum = np.sum(profile_lum_den_v * areas)
-
-    return total_lum
+#
+# def SB_integrated(r_bins, profile_lum_den_v):
+#     """
+#     Integrate luminosity density profile to get total luminosity.
+#
+#     Parameters:
+#     -----------
+#     r_bins : array
+#         Radial bin edges
+#     profile_lum_den_v : array
+#         Luminosity density in each bin
+#
+#     Returns:
+#     --------
+#     total_lum : float
+#         Total integrated luminosity
+#     """
+#     # Add 0 at the beginning of r_bins to include the innermost bin
+#     r_bins_extended = np.insert(r_bins, 0, 0)
+#
+#     # Calculate annular area for each bin
+#     # Area of annulus = π * (r_outer² - r_inner²)
+#     r_inner = r_bins_extended[:-1]
+#     r_outer = r_bins_extended[1:]
+#
+#     areas = np.pi * (r_outer ** 2 - r_inner ** 2)
+#
+#     # remove nans
+#     nanmask = np.isnan(profile_lum_den_v)
+#     profile_lum_den_v = profile_lum_den_v[~nanmask]
+#     areas = areas[~nanmask]
+#
+#     # Total luminosity = sum of (luminosity density × area)
+#     total_lum = np.sum(profile_lum_den_v * areas)
+#
+#     return total_lum
 
 
 # ===========================
@@ -277,7 +283,7 @@ def load_galaxy_data() -> List[GalaxyData]:
 
     # Load ellipse data from pickle file (can use regular pickle for this)
     import pickle
-    with open('ellipse_data_v_stars.pickle', 'rb') as f:
+    with open(pickle_file, 'rb') as f:
         ellipse_dict = pickle.load(f)
 
     # Get all simulations from Tangos
@@ -296,7 +302,7 @@ def load_galaxy_data() -> List[GalaxyData]:
         else:
             timestep = sim.timesteps[0]
 
-        halos = timestep.halos[:20]  # Limit for testing
+        halos = timestep.halos[:50]  # Limit for testing
 
         for halo in halos:
             halo_name = halo.basename
@@ -307,7 +313,10 @@ def load_galaxy_data() -> List[GalaxyData]:
             if halo_key in completed_halos:
                 print(f"Skipping halo {halo_name} - already processed")
                 continue
-
+            if 'n_star' in halo:
+                if extract_single_value(halo['n_star']) <= 5000:
+                    completed_halos.add(halo_key)  # Mark as processed (skip)
+                    continue
             # Check if halo has readable stellar mass
             if 'finder_star_mass' in halo:
                 if halo['finder_star_mass'] <= 0:
@@ -316,11 +325,17 @@ def load_galaxy_data() -> List[GalaxyData]:
             elif 'M_star' in halo:
                 if extract_single_value(halo['M_star']) <= 0:
                     completed_halos.add(halo_key)  # Mark as processed (skip)
+                    try:
+                        i_lum = halo['i_lum']
+                        print(f'{sim},{halo} with no stellar mass somehow has i_lum = {i_lum}??')
+                    except KeyError:
+                        pass
                     continue
 
             # Check if halo exists in ellipse_dict
             if not halo_ref in ellipse_dict[sim_name]:
-                completed_halos.add(halo_key)  # Mark as processed (skip)
+                completed_halos.add(halo_key)
+                print(f'{sim},{halo} missing in ellipse dict')# Mark as processed (skip)
                 continue
 
             print(f"Processing halo {halo.halo_number} ({halo_name})")
@@ -351,6 +366,34 @@ def load_galaxy_data() -> List[GalaxyData]:
     return galaxy_list
 
 
+def shape_at_semi_major(a_s_func, b_s_func, c_s_func, a_eval, rbins,
+                        n_grid=2048):
+    """Axis ratios of the shell whose semi-major axis is `a_eval` (kpc).
+
+    Inverse of shape_semi_major. a_s_func(r) is sampled on a dense grid over
+    [r_min, r_max] and interpolated the other way, so `a_eval` should be an
+    isophote sma measured in kpc. Values outside the sampled range of a give NaN
+    rather than being clamped.
+
+    Returns (rbins, ba, ca), floats if `a_eval` is scalar.
+    """
+    a_eval_arr = np.asarray(a_eval, dtype=float)
+    #a_flat = np.atleast_1d(a_eval_arr)
+    r_min = np.min(rbins)
+    r_max = np.max(rbins)
+
+    r = np.linspace(r_min, r_max, n_grid)
+    a = np.asarray(a_s_func(r), dtype=float)
+    b = np.asarray(b_s_func(r), dtype=float)
+    c = np.asarray(c_s_func(r), dtype=float)
+
+    i = np.argmin(np.abs(a-a_eval))
+    error = np.abs(a[i]-a_eval)
+    # if error/a_eval > 0.3:
+    #     print(f'error in a = {error/a_eval:.2f},r_bin={r[i]:.2f},a={a[i]:.2f},a_eval={a_eval:.2f},r_max={r[-1]:.2f},i={i}')
+    return r[i],a[i],b[i],c[i]
+
+
 def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
     """Process a single halo and extract all relevant data"""
     # Basic setup
@@ -376,6 +419,7 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
         stellar_mass = halo.get('M_star')
 
     dynamical_mass = extract_single_value(halo.get('Mdyn', np.nan))
+    rho= halo.get('star_density_profile')
 
 
 
@@ -384,27 +428,62 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
 
     # reff = halo.get('image_reffs_v',np.nan)[0]
 
-    Reff,v_lum,half_light_radius = get_keys(sim.basename, halo_id,(0,0), ['Reff','V_lum_den','Rhalf'])
-    profile_rbins,mags_v = get_keys(sim.basename, halo_id,(0,0), ['rbins','mags_V'])
+    Reff,v_lum,half_light_radius = get_keys(sim.basename, halo_id,(0,0), ['Reff','i_lum_den','Rhalf'])
+    profile_rbins,mags_v = get_keys(sim.basename, halo_id,(0,0), ['rbins','mags_i'])
     try:
         a = halo['a_s']
         b = halo['b_s']
         c = halo['c_s']
         rbins_s = halo['rbins_s']
+
+        a_i = halo['a_s_i']
+        b_i = halo['b_s_i']
+        c_i = halo['c_s_i']
+        rbins_s_i = halo['rbins_s_i']
     except Exception:
         print(f'no shape found for {sim} {halo}')
         return None
+    # print(ellipse_dict[sim.basename][halo_ref])
+    #sys.exit()
+    
+    a_eval = 2*Reff#ellipse_dict[sim.basename][halo_ref]['0099_t+0.000000_p+0.000000']['r_kpc'][0]
 
     rbins_f, a_f, b_f, c_f, a_s_func, b_s_func, c_s_func = smooth_shape(rbins_s, a, b, c, k=3)
     # get a,b,c at 2*reff
     a_s = a_s_func(2 * Reff)
     b_s = b_s_func(2 * Reff)
     c_s = c_s_func(2 * Reff)
-    ba_s = b_s / a_s
-    ca_s = c_s / a_s
+
+
+    rbins_f, a_f, b_f, c_f, a_s_func, b_s_func, c_s_func = smooth_shape(rbins_s_i, a_i, b_i, c_i, k=3)
+    # get a,b,c at 2*reff
+    a_s_i = a_s_func(2 * Reff)
+    b_s_i = b_s_func(2 * Reff)
+    c_s_i = c_s_func(2 * Reff)
+
+
+    #r, a, b, c = shape_at_semi_major(a_s_func, b_s_func, c_s_func, a_eval, rbins_s)
+    # ba_s = b/a
+    # ca_s = c/a
 
     #halo_data = gec.load_and_process_halo_data(pickle_file, sim, halo_ref)
-    ellipticity_interpolator = SphereInterpolator(halo_data)
+
+    data = halo_data.copy()
+    if 'a_s' in data.keys():
+        del data['a_s']
+        del data['b_s']
+        del data['c_s']
+        del data['rbins']
+        del data['a_s_i']
+        del data['b_s_i']
+        del data['c_s_i']
+        del data['rbins_s_i']
+
+    eps_dict = {}
+    for orientation in data:
+        eps_dict[orientation] = data[orientation]['eps'][0]
+
+    ellipticity_interpolator = SphereInterpolator(eps_dict)
     sb_dict = {}
 
     thetas, phis = gec.extract_floats(list(halo_data.keys()))
@@ -412,7 +491,7 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
     phis = np.asarray(phis)
     orientations = list(halo_data.keys())
     for orientation,theta,phi in zip(orientations,thetas,phis):
-        mag,area = get_keys(sim.basename, halo_id, (theta,phi),['mags_V','binarea'])
+        mag,area = get_keys(sim.basename, halo_id, (theta,phi),['mags_i','binarea'])
         mag0 = mag[0]
         area0 = area[0]
         sigma0 = (10 ** (0.4 * (4.8 - mag0))) / area0   # normalize to total lum
@@ -443,7 +522,7 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
     # )
 
     #total_lum = SB_integrated(halo['profile_rbins_v'][0], halo['profile_v_lum_den'][0])
-    total_lum = SB_integrated(profile_rbins, v_lum)
+    total_lum = halo['i_lum']#SB_integrated(profile_rbins, v_lum)
 
     # Get 3D shape functions
     # shape_b_over_a = halo.calculate('ba_s_smoothed()')
@@ -464,9 +543,14 @@ def process_halo(halo, sim, ellipse_dict: dict) -> Optional[GalaxyData]:
         environment=environment,
         ellipticity_interpolator=ellipticity_interpolator,
         surface_brightness_interpolator=sb_interpolator,
-        shape_b_over_a=ba_s,
-        shape_c_over_a=ca_s,
-        reff=Reff
+        a=a_s,
+        b=b_s,
+        c=c_s,
+        a_i=a_s_i,
+        b_i=b_s_i,
+        c_i=c_s_i,
+        reff=Reff,
+        rho=rho
     )
 
     return galaxy_data

@@ -169,15 +169,16 @@ def attainable_fast(params):
         return False
     return True
 
-def _a_bin_edges(a_obs, n_bins=8):
-    interior = np.quantile(a_obs, np.linspace(0, 1, n_bins + 1)[1:-1])
-    interior = np.unique(interior)
-    return np.concatenate([[0.0], interior,
-                           [max(a_obs.max() * 5, interior[-1] * 5)]])
+def _a_bin_edges(a_obs, n_bins=15):
+    # interior = np.quantile(a_obs, np.linspace(0, 1, n_bins + 1)[1:-1])
+    # interior = np.unique(interior)
+    # return np.concatenate([[0.0], interior,
+    #                        [max(a_obs.max() * 5, interior[-1] * 5)]])
+    return np.linspace(np.min(a_obs)-0.25,np.max(a_obs)+0.25,n_bins)
 
 
 
-def containment_penalty(acc, acc_min=0.75, width=0.01, hard_floor=0.50):
+def containment_penalty(acc, acc_min=0.65, width=0.01, hard_floor=0.50):
     """
     Smooth log-prior penalty: ~0 well above acc_min, softly negative below,
     -inf below hard_floor. Returns a value to ADD to the log-likelihood.
@@ -188,7 +189,7 @@ def containment_penalty(acc, acc_min=0.75, width=0.01, hard_floor=0.50):
     if not np.isfinite(acc) or acc < hard_floor:
         return np.inf
     x = (acc_min - acc) / width
-    return 40*float(np.logaddexp(0.0, x) ** 2)
+    return float(np.logaddexp(0.0, x) ** 2)
 
 
 def projected_semi_axes(phi, theta, B, C):
@@ -289,12 +290,12 @@ class LogLike7:
     """
 
     def __init__(self, q_obs, a_obs, n_draw_pool=None, solve_pool=20_000,
-                 seed=0, dtype=np.float64, n_a_bins=8):
+                 seed=0, dtype=np.float64, n_a_bins=15,contain=True):
 
         self.q_obs = np.asarray(q_obs, float)
         self.a_obs = np.asarray(a_obs, float)
         if n_draw_pool is None:
-            n_draw_pool = max(10 * len(self.q_obs), 30_000)
+            n_draw_pool = max(10 * len(self.q_obs), 100_000)
         self.n_draw_pool = int(n_draw_pool)
         self.solve_pool = int(solve_pool)
         self.seed = seed
@@ -314,6 +315,15 @@ class LogLike7:
         # so is sum ln(n_i!). Both folded in here to keep logL values
         # comparable with the original implementation.
         self.const = -self.N_obs - float(gammaln(self.n_pos + 1).sum())
+        if contain:
+            self.acc_min = 0.75
+            self.hard_floor = 0.4
+            self.width = 0.01
+        else:
+            self.acc_min=0.2
+            self.hard_floor=0.1
+            self.width=0.01
+
 
     # the CRN pools are large; rebuild them lazily in each worker instead
     # of shipping them through pickle
@@ -361,7 +371,7 @@ class LogLike7:
         t = crn.theta[idx]
         alpha, beta = projected_semi_axes(phi, t, B, C)
         q = beta / alpha
-        a_model = A * np.sqrt(alpha * beta)
+        a_model = A + 0.5*np.log10(alpha*beta)
         n_model = self._hist(q, a_model)
         total_model = n_model.sum()
         if total_model == 0:
@@ -372,8 +382,8 @@ class LogLike7:
         #add a negative term as a penalty for losing model draws
         #loglike = loglike -(1/acc**3+1)*25
 
-        loglike = loglike - containment_penalty(acc)
-        assert loglike < 0
+        loglike = loglike - 40*containment_penalty(acc,self.acc_min,self.hard_floor,self.width)
+        # assert loglike < 0
         return loglike
 
 

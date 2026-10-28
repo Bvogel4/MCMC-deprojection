@@ -17,7 +17,7 @@ from scipy import stats
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="emcee")
 
-Q_BINS = np.arange(0, 1.0000001, 0.04)   # same 0.04 bins as the original
+Q_BINS = np.arange(0, 1.0000001, 0.02)   # same 0.04 bins as the original
 import numpy as np
 from scipy.special import gammaln
 from scipy.special import ndtr, ndtri
@@ -34,8 +34,10 @@ def _init_ll7(q_obs, a_obs, kwargs):
     global _LL7
     _LL7 = fl.LogLike7(q_obs, a_obs, **kwargs)
 
+
 def _ll7(theta):
     return _LL7(theta)
+
 
 
 def random_viewing_angles(n):
@@ -426,25 +428,25 @@ def adaptive_ellipsoid_distribution(params, n_samples, rng=None):
     B, C, A = dist.sample(n_samples)
     return B, C, A, dist.acc
 
-def generate_ellipsoids(params,n):
-    mu_b,mu_c,sigma_b,sigma_c = params
-    rng = np.random.default_rng()
-    b = rng.normal(loc=mu_b,scale=sigma_b,size=n)
-    c = rng.normal(loc=mu_c,scale=sigma_c,size=n)
-    #count number of valid ellipses
-    info = {}
-    valid = 0 < c < b < 1
-    acc = np.sum(~valid)/n
+# def generate_ellipsoids(params,n):
+#     mu_b,mu_c,sigma_b,sigma_c = params
+#     rng = np.random.default_rng()
+#     b = rng.normal(loc=mu_b,scale=sigma_b,size=n)
+#     c = rng.normal(loc=mu_c,scale=sigma_c,size=n)
+#     #count number of valid ellipses
+#     info = {}
+#     valid = 0 < c < b < 1
+#     acc = np.sum(~valid)/n
+#
+#     info['acc']=acc
+#     if acc > 0.7:
+#         info['ok']=True
+#     else:
+#         info['ok']=False
+#     return b,c,info
 
-    info['acc']=acc
-    if acc > 0.7:
-        info['ok']=True
-    else:
-        info['ok']=False
-    return b,c,info
 
-
-def containment_penalty(acc, acc_min=0.85, width=0.03, hard_floor=0.50):
+def containment_penalty(acc, acc_min=0.8, width=0.03, hard_floor=0.50):
     """
     Smooth log-prior penalty: ~0 well above acc_min, softly negative below,
     -inf below hard_floor. Returns a value to ADD to the log-likelihood.
@@ -455,7 +457,7 @@ def containment_penalty(acc, acc_min=0.85, width=0.03, hard_floor=0.50):
     if not np.isfinite(acc) or acc < hard_floor:
         return -np.inf
     x = (acc_min - acc) / width
-    return 40*float(np.logaddexp(0.0, x) ** 2)
+    return 30*float(np.logaddexp(0.0, x) ** 2)
 
 def _cov_from_sigmas(sig_a, sig_b, sig_c, rho_ac):
     cov = np.diag([sig_a ** 2, sig_b ** 2, sig_c ** 2])
@@ -724,20 +726,26 @@ def generate_ellipsoid_distribution(params, n_samples, rng=None):
         else:
             info = {'ok': False, 'acc': acc}
     elif params.size == 7:
-        if n_samples > 1000:
-            crn = fl._CRN(5 * n_samples, seed=0)
-        if n_samples < 1000:
-            crn = fl._CRN(50 * n_samples, seed=0)
-        latent = fl.solve_latent_fast(params, crn, max_iter=50)
+        theta = np.asarray(params, dtype=float)
+        if not attainable_fast(theta):
+            return -np.inf
+
+        # --- one moment solve per call (the original did two) ---
+        latent = fl.solve_latent_fast(
+            theta, fl.get_crn(20000, 0, float), )
         if latent is None:
-            raise ValueError(f"params not attainable: {params}")
-        a, b, c, keep = fl._draw(latent, crn)
+            return -np.inf  # not attainable: this replaces the
+            # separate attainable() pre-check
+
+        crn = fl.get_crn(20000, 0, float)
+        d = fl._draw(latent, crn)
+        if d is None:
+            return -np.inf
+        a, b, c, keep = d
+
         idx = np.flatnonzero(keep)
-        if idx.size < n_samples:
-            print(idx.size,5*n_samples)
-            raise RuntimeError(f"only {idx.size} of {n_samples} survived; "
-                               f"enlarge the pool")
-        idx = idx[:n_samples]
+        # if idx.size < 1000:
+        #     return -np.inf
         A_samples, B_samples, C_samples = a[idx], b[idx], c[idx]
         n_good = int(keep.sum())  # inside the support
         n_bad = keep.size - n_good  # rejected
@@ -746,6 +754,29 @@ def generate_ellipsoid_distribution(params, n_samples, rng=None):
             info = {'ok':True,'acc':acc}
         else:
             info = {'ok':False,'acc':acc}
+
+        # if n_samples > 1000:
+        #     crn = fl._CRN(n_samples*10, seed=0,dtype=float)
+        # if n_samples < 1000:
+        #     crn = fl._CRN(n_samples*10, seed=0,dtype=float)
+        # latent = fl.solve_latent_fast(params, crn, max_iter=500)
+        # if latent is None:
+        #     raise ValueError(f"params not attainable: {params}")
+        # a, b, c, keep = fl._draw(latent, crn)
+        # idx = np.flatnonzero(keep)
+        # if idx.size < n_samples:
+        #     print(idx.size,5*n_samples)
+        #     raise RuntimeError(f"only {idx.size} of {n_samples} survived; "
+        #                        f"enlarge the pool")
+        # idx = idx[:n_samples]
+        # A_samples, B_samples, C_samples = a[idx], b[idx], c[idx]
+        # n_good = int(keep.sum())  # inside the support
+        # n_bad = keep.size - n_good  # rejected
+        # acc = n_good / keep.size
+        # if acc > 0.6:
+        #     info = {'ok':True,'acc':acc}
+        # else:
+        #     info = {'ok':False,'acc':acc}
         
     else:
         raise ValueError(
@@ -845,10 +876,10 @@ def attainable_fast(params):
         return False
     if not (0 < sigma_b < 0.7 and 0 < sigma_c < 0.7):
         return False
-    if (0 > mu_b-0.2*sigma_b) or (mu_b+0.2*sigma_b > 1):
-        return False
-    if (0 > mu_c-0.2*sigma_c) or (mu_c+0.2*sigma_c > mu_b):
-        return False
+    # if (0 > mu_b-0.2*sigma_b) or (mu_b+0.2*sigma_b > 1):
+    #     return False
+    # if (0 > mu_c-0.2*sigma_c) or (mu_c+0.2*sigma_c > mu_b):
+    #     return False
     if not valid_theta(params):
         return False
     return True
@@ -954,8 +985,19 @@ def old_log_likelihood(params, q_obs):
     assert loglike < 0
     return log_like
 
+#
+# class log_likelihood():
+#     def __init__(self,contain=True):
+#         if contain:
+#             self.acc_min=0.8
+#             self.hard_floor=0.5
+#         else:
+#             self.acc_min=0.2
+#             self.hard_floor=0.1
+#         self.width=0.01
 
-def log_likelihood(params, q_obs, a_obs=None):
+
+def log_likelihood(params, q_obs, contain=False):
     """
     Unified 4/7-parameter log likelihood.
 
@@ -966,21 +1008,28 @@ def log_likelihood(params, q_obs, a_obs=None):
         7: [mu_a, mu_b, mu_c, sigma_a, sigma_b, sigma_c, rho_ac]
     q_obs : array
         Observed projected axis ratios.
-    a_obs : array or None
-        Observed (projected) effective radii, paired index-by-index with
-        q_obs. Required for the 7-parameter model.
+    contain : bool
+        If True, use the default containment penalty; otherwise use the
+        softer version (hard_floor=0.1, acc_min=0.2).
 
-    Usage with emcee (both models):
-        sampler = emcee.EnsembleSampler(n_walkers, ndim, log_likelihood,
-                                        args=[q_obs, a_obs], pool=pool)
+    Notes
+    -----
+    Adaptive binning/draws: if len(q_obs) < 150, the model is sampled with
+    30x as many draws and histogrammed with bins twice as wide (0.04 vs 0.02).
     """
     params = np.asarray(params, dtype=float)
-    ndim = len(params)
-    # n_draws = min(len(q_obs),10000)
-    n_draws = len(q_obs)  # number of draws to approximate the model distribution
+    q_obs = np.asarray(q_obs, dtype=float)
+    n_q = len(q_obs)
+
+    # ---------------- adaptive draws / bins ----------------
+    if n_q < 150:
+        n_draws = 30 * n_q
+        q_bins = np.linspace(0.0, 1.0, 26)  # width 0.04
+    else:
+        n_draws = n_q
+        q_bins = np.linspace(0.0, 1.0, 51)  # width 0.02
 
     # ---------------- constraints / priors ----------------
-    # if ndim == 4:
     mu_B, mu_C, sigma_B, sigma_C = params
     if not (0 < mu_C < mu_B <= 1):
         return -np.inf
@@ -988,28 +1037,28 @@ def log_likelihood(params, q_obs, a_obs=None):
         return -np.inf
 
     q_model, a_model, info = generate_model_projections(params, n_samples=n_draws)
-    if info is not None:
-        if not info["ok"]:
-            return -np.inf
-    acc = info['acc']
+    if info is not None and not info["ok"]:
+        return -np.inf
+    acc = info["acc"]
 
-    n_obs, _ = np.histogram(q_obs, bins=Q_BINS)
-    n_model, _ = np.histogram(q_model, bins=Q_BINS)
+    n_obs, _ = np.histogram(q_obs, bins=q_bins)
+    n_model, _ = np.histogram(q_model, bins=q_bins)
 
-
+    # Rescale model counts to the observed total
     total_model = n_model.sum()
     total_obs = n_obs.sum()
+    if total_model == 0:
+        return -np.inf
     if total_obs != total_model:
         n_model = n_model * total_obs / total_model
 
     loglike = _binned_poisson_loglike(n_obs, n_model)
-    # min_q = min(q_obs)
-    # i_q_model = q_model[q_model < min_q]
-    # add a negative penalty for each model prediction under min_q, scaled by how far it is:
-    # d_q = (i_q_model - min_q) / .04
-    # p = np.sum(d_q)
-    # loglike +=p
-    loglike = loglike - containment_penalty(acc)
+
+    if contain:
+        loglike = loglike - containment_penalty(acc)
+    else:
+        loglike = loglike - containment_penalty(acc, hard_floor=0.1, acc_min=0.2)
+
     assert loglike < 0
     return loglike
 
@@ -1028,7 +1077,7 @@ def theta0_from_4param(params_4, a_obs,logL):
     theta0,acc = project_to_attainable(theta0,logL)
     return theta0,acc
 
-def initialize_walkers(theta0, n_walkers, rng, logL, frac=0.1, range_frac=0.1,
+def initialize_walkers(theta0, n_walkers, rng, logL, frac=0.1, range_frac=0.03,
                        sigma_b_floor_frac=0.1, max_tries=1000):
     """
     Gaussian ball around theta0, sized to the physical scale of each
@@ -1134,7 +1183,8 @@ def _init_walkers_4d(theta0, n_walkers, q_obs, rng=None,
     return good[:n_keep]
 
 def infer_intrinsic_shape(q_obs, n_walkers=128, n_steps=5000, burn_in=500,
-                          n_cores=None, output_prefix=None, output_dir="results"):
+                          n_cores=None, output_prefix=None, output_dir="results",
+                          contain=True):
     """
     Infer the intrinsic shape distribution from observed projected axis ratios.
 
@@ -1152,6 +1202,8 @@ def infer_intrinsic_shape(q_obs, n_walkers=128, n_steps=5000, burn_in=500,
         tuple: (samples, max_prob_params, sampler) - MCMC samples, parameters with highest probability, and the sampler
     """
     # Set initial guess if not provided
+    if burn_in > n_steps:
+        burn_in = int(n_steps / 2)
 
     ndim = 4  # Number of parameters
 
@@ -1190,17 +1242,15 @@ def infer_intrinsic_shape(q_obs, n_walkers=128, n_steps=5000, burn_in=500,
 
     for i in range(n_walkers):
         params = pos[i, :]
-        ll = log_likelihood(params, q_obs)
-        if ll == -np.nan or ll == -np.inf:
+        ll = log_likelihood(params,q_obs)
+        if np.isnan(ll) or ll == -np.inf:
             print(f'{ll}, {params}')
-            raise f'invalid walker'
+            raise ValueError(f'invalid walker')
         assert ll < 0, 'loglikelhood must be a real negative number!'
-        
 
-    # Set up the sampler with multiprocessing if requested
     if n_cores is not None and n_cores > 1:
         with Pool(processes=n_cores) as pool:
-            sampler = emcee.EnsembleSampler(n_walkers, ndim, log_likelihood, args=[q_obs], pool=pool)
+            sampler = emcee.EnsembleSampler(n_walkers, ndim, log_likelihood, args=[q_obs,contain], pool=pool)
 
             # Run MCMC
             print(f"Running MCMC with {n_cores} processes...")
@@ -1210,7 +1260,7 @@ def infer_intrinsic_shape(q_obs, n_walkers=128, n_steps=5000, burn_in=500,
             print(f"MCMC completed in {end_time - start_time:.2f} seconds")
     else:
         # Run without multiprocessing
-        sampler = emcee.EnsembleSampler(n_walkers, ndim, log_likelihood, args=[q_obs])
+        sampler = emcee.EnsembleSampler(n_walkers, ndim, log_likelihood, args=[q_obs,contain])
 
         # Run MCMC
         print("Running MCMC...")
@@ -1321,7 +1371,8 @@ def infer_intrinsic_shape_multivariate(q_obs, params_4,
                                        a_obs,
                                        n_walkers=128, n_steps=5000, burn_in=500,
                                        n_cores=None, rng=None,
-                                       output_prefix=None, output_dir="results"):
+                                       output_prefix=None, output_dir="results",
+                                       contain=True):
     """
     Infer the 7-parameter intrinsic shape distribution, warm-started from a
     4-parameter result.
@@ -1362,11 +1413,13 @@ def infer_intrinsic_shape_multivariate(q_obs, params_4,
     mu_B, mu_C, sigma_B, sigma_C = np.asarray(params_4, dtype=float)
     mu_a, sigma_a = np.mean(a_obs), np.std(a_obs)
     rho_ac = 0
-
-    ll_kwargs = dict(solve_pool=20_000)  # add n_draw_pool=... to tune
+    assert burn_in < n_steps, 'Burn-in amount too high, or n_steps too low'
+    n_obs = len(q_obs)
+    ll_kwargs = dict(solve_pool=20_000,contain=contain,n_draw_pool=n_obs)   # add n_draw_pool=... to tune
     ll = fl.LogLike7(q_obs, a_obs, **ll_kwargs)
 
     theta0,f = theta0_from_4param(params_4, a_obs,ll)
+    theta0[1] = theta0[1]-0.1
 
 
     if f < 1.0:

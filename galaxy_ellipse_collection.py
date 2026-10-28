@@ -8,11 +8,18 @@ import numpy as np
 import pickle
 import re
 from glob import glob
+import io
+import contextlib
+import logging
+from multiprocessing import Pool
 
+from matplotlib.lines import Line2D
+from scipy.stats import norm
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator, Rbf
 from scipy.interpolate import RBFInterpolator
 from matplotlib.colors import is_color_like
 from joblib import Memory
+from matplotlib.patches import Ellipse
 
 memory = Memory(location='.cache/interpolators', verbose=0)
 from fast_likelihood import projected_semi_axes
@@ -25,7 +32,7 @@ from shape_inference import (
     infer_intrinsic_shape,
     infer_intrinsic_shape_multivariate,
     attainable,
-    random_viewing_angles
+    random_viewing_angles,
     
 )
 
@@ -34,12 +41,29 @@ from shape_plotting import (
     n_params, unpack_params, sample_model_projections,
     plot_corner, plot_chain_evolution, plot_ellipsoid_shapes,
     plot_projected_distributions, plot_projected_distributions_with_model,
-    plot_shape_distribution, plot_q_comparison,
+    plot_covariant_distribution, plot_q_comparison,
+    fit_ellipsoid_params
 )
 
+PARAM_NAMES = {
+    4: ['mu_B', 'mu_C', 'sigma_B', 'sigma_C'],
+    # order taken from the infer_intrinsic_shape_multivariate docstring
+    # (std+corr form). Must match what cov_fit() returns for the truth.
+    7: ['mu_A', 'mu_B', 'mu_C', 'sigma_A', 'sigma_B', 'sigma_C', 'rho_AC'],
+}
+SHAPE_IDX = {4: (0, 1), 7: (1, 2)}      # positions of (mu_B, mu_C)
+FIT_NDIM = {'fit4': 4, 'fit7': 7}
+
+def get_labels(ndim):
+    names = None
+    try:
+        names = PARAM_NAMES[ndim]
+    except KeyError:
+        print('invalid dimensions for names?')
+    return names
 
 
-def get_keys(simname, hid, orientation_coords, keys, cachedir='caches'):
+def get_keys(simname, hid, orientation_coords, keys, cachedir='caches',band='i'):
 
     """
     Pull one or more keys out of a cached face-on/oriented image dict.
@@ -50,8 +74,8 @@ def get_keys(simname, hid, orientation_coords, keys, cachedir='caches'):
     keys               : str or list of str
     """
     t, p = orientation_coords
-    pattern = (f'{cachedir}/vband_cache_{simname}_n100/'
-               f'VBandStarImages_halo{hid}/*_t{t:+f}_p{p:+f}.pkl')
+    pattern = (f'{cachedir}/{band}band_cache_{simname}_n100/'
+               f'*BandStarImages_halo{hid}/*_t{t:+f}_p{p:+f}.pkl')
 
     matches = glob(pattern)
     if not matches:
@@ -62,9 +86,392 @@ def get_keys(simname, hid, orientation_coords, keys, cachedir='caches'):
 
     if isinstance(keys, str):
         return d[keys]
-    #print(d.keys())
     return [d[k] for k in keys]
 
+
+_BC_MU_IDX = {4: (0, 1), 7: (1, 2)}
+_BC_SIGMA_IDX = {4: (2, 3), 7: (4, 5)}
+
+
+def plot_bootstrap_ellipses(boot_params, reference_params=None,
+                            true_params=None, show_truth=True, intrinsic_data=None,
+                            n_ellipses=1000, n_sigma=1.0, seed=0,
+                            boot_color='C0', ref_color='C1',
+                            boot_label='1 angle / galaxy', ref_label='',#Many angles / galaxy',
+                            kf_key='2R_eff', show_contours=False, annotate=True,
+                            output_file=None, title=None, **ellipse_kwargs):
+    """
+    B/A - C/A plane: many-angle reference fit (drawn by plot_ellipsoid_shapes,
+    so it matches your other shape plots) with one faint mean +/- n_sigma
+    ellipse per bootstrap realisation overlaid.
+
+    boot_params : (n_boot, 4 or 7) point estimates, e.g. boot['fit4']['median']
+    reference_params, reference_samples : many-angle max-prob params / samples.
+        If reference_params is None, the median of boot_params is used instead.
+    true_params : truth vector; drawn only when show_truth=True.
+    n_sigma : should match the ellipse size plot_ellipsoid_shapes draws.
+    show_contours : False draws the reference as a plain ellipse (also for
+        7-param fits); None uses plot_ellipsoid_shapes' default.
+    **ellipse_kwargs : passed on to plot_ellipsoid_shapes.
+    """
+    pts = np.asarray(boot_params, dtype=float)
+    ndim = pts.shape[1]
+    ib, ic = _BC_MU_IDX[ndim]
+    isb, isc = _BC_SIGMA_IDX[ndim]
+    #
+    reference_params = np.asarray(reference_params, dtype=float)
+
+    fig = plot_ellipsoid_shapes(
+        [reference_params], [reference_params],
+        true_params_list=([np.asarray(true_params)]
+                          if (show_truth and true_params is not None) else None),
+        labels=[ref_label], color=[ref_color],
+        intrinsic_data=None, kf_key=kf_key,
+        show_contours=True, annotate=False,
+        focus_on_max_prob=True, show_samples=False, show_ellipses=True,
+        **ellipse_kwargs)
+    ax = fig.axes[0]
+
+    rng = np.random.default_rng(seed)
+    sel = rng.choice(len(pts), size=min(n_ellipses, len(pts)), replace=False)
+    alpha = float(np.clip(6.0 / len(sel), 0.08, 0.5))  # fainter when there are many
+    for k in sel:
+        ax.add_patch(Ellipse((pts[k, ib], pts[k, ic]),
+                             2 * n_sigma * abs(pts[k, isb]), 2 * n_sigma * abs(pts[k, isc]),
+                             fill=False, ec=boot_color, lw=0.8, alpha=alpha, zorder=1.5))
+    ax.scatter(pts[:, ib], pts[:, ic], s=15, color=boot_color, alpha=1, lw=0.6, zorder=2.5,edgecolors='white')
+
+    # add the bootstrap entry to the legend plot_ellipsoid_shapes made
+    handles, labels = ax.get_legend_handles_labels()
+    handles.append(Line2D([], [], color=boot_color, marker='o', ms=4, lw=0.8, alpha=0.8))
+    labels.append(f'{boot_label}, {len(pts)} runs'
+                  + (f' ({len(sel)} shown)' if len(sel) < len(pts) else ''))
+    old = ax.get_legend()
+    fontsize = old.get_texts()[0].get_fontsize() if old is not None and old.get_texts() else 9
+    ax.legend(handles, labels, loc=old._loc if old is not None else 'best', fontsize=fontsize)
+
+    if title:
+        ax.set_title(title)
+    print(output_file)
+    if output_file:
+        fig.savefig(output_file, dpi=300, bbox_inches='tight')
+    return fig
+
+    # ----------------------------------------------------------------------------
+    # Method -- paste inside class GalaxyEllipseCollection
+    # ----------------------------------------------------------------------------
+    def plot_bootstrap_vs_reference(self, boot=None, fit_key='fit4',
+                                    reference_dir=None, reference_prefix=None,
+                                    show_truth=True, point_estimate='median',
+                                    output_file=None, **kwargs):
+        """
+        Ellipse plot of a bootstrap run (self.bootstrap by default) against the
+        many-angle run.
+
+        fit_key : 'fit4' or 'fit7'
+        reference_dir, reference_prefix : the output_dir / output_prefix you gave
+            run_inference_all_halos. The 7-param reference is read from
+            <reference_dir>_covariance, as that function writes it. If omitted,
+            the reference stored in `boot` is used (params only, no samples).
+        **kwargs : forwarded to plot_bootstrap_ellipses (n_ellipses, n_sigma,
+            ref_color, boot_label, ref_label, annotate, show_contours, ...).
+        """
+        boot = boot or self.bootstrap
+        fit = boot[fit_key]
+        if fit is None:
+            raise ValueError(f'no {fit_key} results in this bootstrap run')
+
+        ref_params = boot.get('reference_params', {}).get(fit_key)
+        ref_samples = boot.get('reference_samples', {}).get(fit_key)
+        if reference_dir is not None and reference_prefix is not None:
+            ref_dir = Path(reference_dir)
+            if fit_key == 'fit7':
+                ref_dir = ref_dir.with_name(ref_dir.name + '_covariance')
+            f = ref_dir / f'{reference_prefix}_results.pkl'
+            with open(f, 'rb') as fh:
+                res = pickle.load(fh)
+            ref_params = np.asarray(res['max_prob_params'], dtype=float).ravel()
+            ref_samples = res.get('samples')
+
+        truth = boot['truth']
+        if output_file is None:
+            output_file = str(Path(boot['output_dir']) /
+                              f'{boot["output_prefix"]}{self.band_key}_bootstrap_'
+                              f'{fit_key[-1]}p_ellipses_vs_reference.png')
+
+        return plot_bootstrap_ellipses(
+            fit[point_estimate], reference_params=ref_params,
+            reference_samples=ref_samples,
+            true_params=boot['true_params'][fit_key], show_truth=show_truth,
+            intrinsic_data=(truth['a_s'], truth['ba_s'], truth['ca_s']),
+            kf_key=f'{self.radius}R_eff', output_file=output_file, **kwargs)
+
+
+# ===========================================================================
+# Worker (module level so multiprocessing can pickle it)
+# ===========================================================================
+def _summarize_chain(samples, max_prob_params, sampler, burn_in, n_keep, rng):
+    samples = np.asarray(samples)
+    keep = rng.choice(len(samples), size=min(n_keep, len(samples)), replace=False)
+    p2_5, p16, p50, p84, p97_5 = np.percentile(samples, [2.5, 16, 50, 84, 97.5], axis=0)
+    emcee_log = logging.getLogger('emcee')
+    old_level = emcee_log.level
+    emcee_log.setLevel(logging.ERROR)  # autocorr warnings go via logging, not stdout
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            tau = sampler.get_autocorr_time(quiet=True, discard=burn_in)
+    except Exception:
+        tau = np.full(samples.shape[1], np.nan)
+    finally:
+        emcee_log.setLevel(old_level)
+    return dict(
+        map=np.asarray(max_prob_params, dtype=float),
+        median=p50, p16=p16, p84=p84, p2_5=p2_5, p97_5=p97_5,
+        thinned=samples[keep],
+        acceptance=float(np.mean(sampler.acceptance_fraction)),
+        tau=np.asarray(tau, dtype=float),
+    )
+
+
+def _bootstrap_worker(task):
+    """Run the 4-param (and optionally 7-param) fit on one single-angle draw."""
+    i, mcmc_seed, q, a, cfg = task
+    np.random.seed(mcmc_seed)  # walker init + emcee use global RNG
+    rng = np.random.default_rng(mcmc_seed)
+    out = {'i': i, 'seed': mcmc_seed, 'q': q, 'a': a, 'error': None}
+    log = io.StringIO()  # swallow prints / progress bars
+    try:
+        t0 = time.time()
+        with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+            s4, m4, samp4 = infer_intrinsic_shape(
+                q, n_cores=None, output_prefix=None, contain=cfg['contain'],
+                **cfg['mcmc_4'])
+        out['fit4'] = _summarize_chain(s4, m4, samp4, cfg['mcmc_4']['burn_in'],
+                                       cfg['n_keep'], rng)
+        out['fit4']['time'] = time.time() - t0
+        out['s4'],out['m4'],out['samp4'] = s4, m4, samp4
+
+        if cfg['multivariate']:
+            t0 = time.time()
+            init = out['fit4'][cfg['init_from']]
+            with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+                s7, m7, samp7 = infer_intrinsic_shape_multivariate(
+                    q, init, a, n_cores=None, rng=rng, output_prefix=None,
+                    contain=cfg['contain'], **cfg['mcmc_7'])
+            out['fit7'] = _summarize_chain(s7, m7, samp7, cfg['mcmc_7']['burn_in'],
+                                           cfg['n_keep'], rng)
+            out['fit7']['time'] = time.time() - t0
+            out['s7'],out['m7'],out['samp7'] = s7, m7, samp7
+    except Exception as ex:
+        out['error'] = f'{type(ex).__name__}: {ex}'
+        out['log_tail'] = log.getvalue()[-2000:]
+    return out
+
+
+# ===========================================================================
+# Plotting helpers
+# ===========================================================================
+def plot_bootstrap_marginals(fit, point_key='median', truth=None, reference=None,
+                             color='C0', output_file=None, title=None):
+    """Histogram of point estimates per parameter vs the typical single-run width."""
+    pts = fit[point_key]
+    ndim = pts.shape[1]
+    names = get_labels(ndim)
+    hw = np.median(0.5 * (fit['p84'] - fit['p16']), axis=0)
+    ncol = 4
+    nrow = int(np.ceil(ndim / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4 * ncol, 3.3 * nrow), squeeze=False)
+    for j, ax in enumerate(axes.flat):
+        if j >= ndim:
+            ax.axis('off')
+            continue
+        x = pts[:, j]
+        m = np.median(x)
+        ax.hist(x, bins='auto', density=True, color=color, alpha=0.6,
+                label=f'bootstrap {point_key}')
+        ax.axvspan(m - hw[j], m + hw[j], color='gray', alpha=0.2,
+                   label='typical single-run 68% width')
+        if truth is not None:
+            ax.axvline(truth[j], color='k', lw=2, label='truth (3D shapes)')
+        if reference is not None:
+            ax.axvline(reference[j], color='C1', ls='--', lw=2, label='reference (many angles)')
+        ax.set_xlabel(names[j])
+        ax.set_title(f'scatter σ={np.std(x):.3f} | posterior σ≈{hw[j]:.3f}', fontsize=9)
+    axes.flat[0].legend(fontsize=7)
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    if output_file:
+        fig.savefig(output_file, dpi=200, bbox_inches='tight')
+    return fig
+
+
+def plot_bootstrap_calibration(fit, target, target_name, point_key='median',
+                               output_file=None, title=None):
+    """z-score distribution and credible-interval coverage against a target vector."""
+    ndim = fit['median'].shape[1]
+    names = get_labels(ndim)
+    target = np.asarray(target, dtype=float).ravel()
+    hw = 0.5 * (fit['p84'] - fit['p16'])
+    z = (fit[point_key] - target) / hw
+    cov68 = np.mean((fit['p16'] <= target) & (target <= fit['p84']), axis=0)
+    cov95 = np.mean((fit['p2_5'] <= target) & (target <= fit['p97_5']), axis=0)
+    n = len(z)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4.5))
+    bins = np.linspace(-5, 5, 41)
+    for j in range(ndim):
+        ax1.hist(np.clip(z[:, j], -5, 5), bins=bins, density=True,
+                 histtype='step', lw=1.5, label=names[j])
+    xx = np.linspace(-5, 5, 300)
+    ax1.plot(xx, norm.pdf(xx), 'k--', label='N(0,1)')
+    ax1.set_xlabel(f'({point_key} − {target_name}) / posterior half-width')
+    ax1.set_ylabel('density')
+    ax1.legend(fontsize=8)
+
+    idx = np.arange(ndim)
+    w = 0.38
+    for off, cov, nominal, lab, ls in [(-w / 2, cov68, 0.68, '68%', ':'),
+                                       (w / 2, cov95, 0.95, '95%', '--')]:
+        err = np.sqrt(np.clip(cov * (1 - cov), 1e-12, None) / n)
+        ax2.bar(idx + off, cov, w, yerr=err, capsize=3, label=f'{lab} interval')
+        ax2.axhline(nominal, color='k', ls=ls, lw=1)
+    ax2.set_xticks(idx)
+    ax2.set_xticklabels(names)
+    ax2.set_ylim(0, 1.05)
+    ax2.set_ylabel(f'fraction of runs containing {target_name}')
+    ax2.legend(fontsize=8)
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    if output_file:
+        fig.savefig(output_file, dpi=200, bbox_inches='tight')
+    stats = dict(cov68=cov68, cov95=cov95,
+                 z_mean=np.mean(z, axis=0), z_std=np.std(z, axis=0))
+    return fig, stats
+
+
+def plot_bootstrap_shape_plane(fit, point_key='median', truth=None, reference=None,
+                               intrinsic_data=None, color='C0', output_file=None, title=None):
+    """Cloud of (mu_B, mu_C) estimates in the B/A - C/A plane."""
+    pts = fit[point_key]
+    ib, ic = SHAPE_IDX[pts.shape[1]]
+    fig, ax = plt.subplots(figsize=(5.5, 5.5))
+    ax.plot([0, 1], [0, 1], color='gray', lw=0.8)
+    if intrinsic_data is not None:
+        _, ba, ca = intrinsic_data
+        ax.scatter(ba, ca, s=10, color='gray', alpha=0.5, label='galaxies (intrinsic)')
+    ax.scatter(pts[:, ib], pts[:, ic], s=12, color=color, alpha=0.6,
+               label=f'bootstrap {point_key}s')
+    if truth is not None:
+        ax.scatter(truth[ib], truth[ic], marker='*', s=250, color='k', zorder=5,
+                   label='truth (3D shapes)')
+    if reference is not None:
+        ax.scatter(reference[ib], reference[ic], marker='s', s=80, color='C1',
+                   edgecolor='k', zorder=5, label='reference (many angles)')
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel(r'$\mu_B$  (B/A)')
+    ax.set_ylabel(r'$\mu_C$  (C/A)')
+    ax.legend(fontsize=8, loc='upper left')
+    if title:
+        ax.set_title(title, fontsize=10)
+    fig.tight_layout()
+    if output_file:
+        fig.savefig(output_file, dpi=200, bbox_inches='tight')
+    return fig
+
+
+def plot_bootstrap_hist_band(obs_matrix, model_draws, bins, reference=None,
+                             xlabel='q', color='C0', ref_label='Projections of intrinsic 3D shapes',
+                             output_file=None, title=None):
+    """
+    16-84% histogram bands: single-angle observed samples (gray) and model
+    realisations from each bootstrap's point estimate (colour).
+    """
+    centers = 0.5 * (bins[1:] + bins[:-1])
+
+    def band(arrs):
+        H = np.array([np.histogram(a, bins=bins, density=True)[0] for a in arrs])
+        return np.percentile(H, [16, 50, 84], axis=0)
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    lo, _, hi = band(obs_matrix)
+    ax.fill_between(centers, lo, hi, step='mid', color='gray', alpha=0.3,
+                    label='single-angle mock samples (16–84%)')
+    ax.step(centers, np.histogram(np.ravel(obs_matrix), bins, density=True)[0],
+            where='mid', color='k', lw=1.5, label='all mock draws pooled')
+    lo, med, hi = band(model_draws)
+    ax.fill_between(centers, lo, hi, step='mid', color=color, alpha=0.3,
+                    label='bootstrap models (16–84%)')
+    ax.step(centers, med, where='mid', color=color, lw=1.5, label='bootstrap models (median)')
+    if reference is not None:
+        ax.step(centers, np.histogram(reference, bins, density=True)[0],
+                where='mid', color='C1', ls='--', lw=1.5, label=ref_label)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel('density')
+    ax.legend(fontsize=8)
+    if title:
+        ax.set_title(title, fontsize=10)
+    fig.tight_layout()
+    if output_file:
+        fig.savefig(output_file, dpi=200, bbox_inches='tight')
+    return fig
+
+
+def plot_bootstrap_diagnostics(fit, n_steps, output_file=None, title=None):
+    """Acceptance fraction, autocorrelation time and runtime across iterations."""
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    axes[0].hist(fit['acceptance'], bins=20, color='C0')
+    axes[0].axvspan(0.2, 0.5, color='g', alpha=0.1)
+    axes[0].set_xlabel('mean acceptance fraction')
+
+    tau = fit['tau']
+    finite = np.isfinite(tau).any(axis=1)
+    tau_max = np.full(len(tau), np.nan)
+    tau_max[finite] = np.nanmax(tau[finite], axis=1)
+    if np.any(finite):
+        axes[1].hist(tau_max[finite], bins=20, color='C0')
+    axes[1].axvline(n_steps / 50, color='r', ls='--', label='n_steps / 50')
+    axes[1].set_xlabel(f'max autocorrelation time ({np.sum(~finite)} undefined)')
+    axes[1].legend(fontsize=8)
+
+    axes[2].hist(fit['time'] / 60, bins=20, color='C0')
+    axes[2].set_xlabel('minutes per fit')
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    if output_file:
+        fig.savefig(output_file, dpi=200, bbox_inches='tight')
+    return fig
+
+
+def bootstrap_summary_text(fit, point_key, truth=None, reference=None, calib=None):
+    ndim = fit[point_key].shape[1]
+    pts = fit[point_key]
+    hw = np.median(0.5 * (fit['p84'] - fit['p16']), axis=0)
+    cols = ['param', 'truth', 'reference', 'median_est', 'scatter', 'post_hw',
+            'bias_truth', 'bias/scat', 'bias_ref', 'cov68_t', 'cov95_t', 'cov68_r', 'cov95_r']
+    lines = [f'{len(pts)} successful iterations, point estimate = {point_key}',
+             ''.join(f'{c:>12s}' for c in cols)]
+    fmt = lambda v: f'{v:12.4f}' if v is not None and np.isfinite(v) else f'{"—":>12s}'
+    for j, name in enumerate(PARAM_NAMES[ndim]):
+        med, sc = np.median(pts[:, j]), np.std(pts[:, j])
+        t = None if truth is None else truth[j]
+        r = None if reference is None else reference[j]
+        ct = (calib or {}).get('truth')
+        cr = (calib or {}).get('reference')
+        row = [t, r, med, sc, hw[j],
+               None if t is None else med - t,
+               None if t is None else (med - t) / sc,
+               None if r is None else med - r,
+               None if ct is None else ct['cov68'][j],
+               None if ct is None else ct['cov95'][j],
+               None if cr is None else cr['cov68'][j],
+               None if cr is None else cr['cov95'][j]]
+        lines.append(f'{name:>12s}' + ''.join(fmt(v) for v in row))
+    return '\n'.join(lines)
 
 
 # @memory.cache
@@ -283,6 +690,7 @@ class SphereInterpolator:
         thetas, phis = extract_floats(list(halo_data.keys()))
         thetas = np.asarray(thetas)
         phis   = np.asarray(phis)
+        n_values = len(thetas)
 
         values = np.array([np.atleast_1d(v) for v in halo_data.values()], dtype=float)
 
@@ -292,6 +700,8 @@ class SphereInterpolator:
         self.n_dropped = int((~good).sum())
         if self.n_dropped:
             thetas, phis, values = thetas[good], phis[good], values[good]
+            if self.n_dropped > 0.4*n_values:
+                raise ValueError(f'(Too many nans {self.n_dropped}/{n_values})')
         if len(values) == 0:
             raise ValueError("all samples are NaN; nothing to interpolate")
 
@@ -442,10 +852,10 @@ def cov_fit(a, b, c, verbose=True):
     rho_ac = float(np.clip(rho_ac, -1.0 + 1e-6, 1.0 - 1e-6))
     params = np.array([mu_a, mu_b, mu_c, sig_a, sig_b, sig_c, rho_ac])
     #check if measured params are attainable
-    if attainable(params):
-        return params
-    else:
-        raise ValueError(f"cov_fit(): cov_fit failed for {params}")
+    # if attainable(params):
+    return params
+    # else:
+    #     raise ValueError(f"cov_fit(): cov_fit failed for {params}")
 
 
 
@@ -765,40 +1175,147 @@ def check_existing_results(output_dir, prefix):
 
     return None
 
+
+def shape_at_semi_major(a_s_func, b_s_func, c_s_func, a_eval, rbins,
+                        n_grid=2048):
+    """Axis ratios of the shell whose semi-major axis is `a_eval` (kpc).
+
+    Inverse of shape_semi_major. a_s_func(r) is sampled on a dense grid over
+    [r_min, r_max] and interpolated the other way, so `a_eval` should be an
+    isophote sma measured in kpc. Values outside the sampled range of a give NaN
+    rather than being clamped.
+
+    Returns (rbins, ba, ca), floats if `a_eval` is scalar.
+    """
+    a_eval_arr = np.asarray(a_eval, dtype=float)
+    #a_flat = np.atleast_1d(a_eval_arr)
+    r_min = np.min(rbins)
+    r_max = np.max(rbins)
+
+    r = np.linspace(r_min, r_max, n_grid)
+    a = np.asarray(a_s_func(r), dtype=float)
+    b = np.asarray(b_s_func(r), dtype=float)
+    c = np.asarray(c_s_func(r), dtype=float)
+
+    i = np.argmin(np.abs(a-a_eval))
+    error = np.abs(a[i]-a_eval)
+    # if error/a_eval > 0.3:
+    #     print(f'error in a = {error/a_eval:.2f},r_bin={r[i]:.2f},a={a[i]:.2f},a_eval={a_eval:.2f},r_max={r[-1]:.2f},i={i}')
+    return r[i],a[i],b[i],c[i]
+
+    # with np.errstate(invalid='ignore'):
+    #     ok = np.isfinite(a) & np.isfinite(b) & np.isfinite(c) & (a > 0)
+    # r, a, b, c = r[ok], a[ok], b[ok], c[ok]
+    #
+    # # a -> r must be single valued
+    # if a.size:
+    #     keep = np.concatenate(([True], np.diff(a) > 0))
+    #     r, a, b, c = r[keep], a[keep], b[keep], c[keep]
+    #
+    # if a.size < 2:
+    #     out = [np.full(a_flat.shape, np.nan)] * 3
+    # else:
+    #     inside = (a_flat >= a[0]) & (a_flat <= a[-1]) & np.isfinite(a_flat)
+    #     with np.errstate(invalid='ignore'):
+    #         out = [np.where(inside, np.interp(a_flat, a, v), np.nan)
+    #                for v in (r, b / a, c / a)]
+    # if scalar_input:
+    #     return tuple(float(v.reshape(-1)[0]) for v in out)
+    # return tuple(v.reshape(a_eval_arr.shape) for v in out)
+
+
 class GalaxyEllipseCollection:
     """
     A collection of galaxy ellipse data with methods to generate observed axis ratio distributions
     and run shape inference using MCMC.
     """
 
-    def __init__(self,reff_index=1,run_covariances=False):
+    def __init__(self,radius,reff_index,run_covariances=False,band_key=''):
         """Initialize an empty collection of galaxy ellipses."""
-        self.halos = {}  # Dictionary to store halo data {(sim_name, halo_id): {data}}
+        #self.halos = {}  # Dictionary to store halo data {(sim_name, halo_id): {data}}
+        self.radius = radius
         self.interpolators = {}  # Dictionary to store interpolation functions
         self.reff_interpolators = {}
         self.n_steps = 30000
         self.halo_data = {}  # Store raw halo data for reference
         self.reff_index = reff_index
         self.run_covariances = run_covariances
+        self.band_key=band_key
 
 
-
-
-    def add_halo(self, sim_name, halo_id, halo_data,
-                 interpolation_method='linear', coordinate_system='angles'):
+    def add_halo(self, sim_name, halo_id, halo_data):
         halo_key = (sim_name, halo_id)
-        self.halo_data[halo_key] = halo_data  # Store raw data for reference
-        self.halos[halo_key] = halo_data
+        #self.halo_data[halo_key] = halo_data  # Store raw data for reference
+        #self.halos[halo_key] = halo_data
+
+
         data = halo_data.copy()
         if 'a_s' in data.keys():
-            del data['ba_s']
-            del data['ca_s']
             del data['a_s']
+            del data['b_s']
+            del data['c_s']
+            del data['rbins']
+            del data['a_s_i']
+            del data['b_s_i']
+            del data['c_s_i']
+            del data['rbins_i']
+        eps_dict={}
+        for orientation in data:
+            eps_dict[orientation] = data[orientation]['eps'][self.reff_index]
 
-        interpolator = SphereInterpolator(data)
+        # a_eval = data['0099_t+0.000000_p+0.000000']['r_kpc'][self.reff_index]
+
+
+
+        interpolator = SphereInterpolator(eps_dict)
         self.interpolators[halo_key] = interpolator
         reff_dict = self.create_reff_dict(data,sim_name,halo_id)
         self.reff_interpolators[halo_key] = SphereInterpolator(reff_dict)
+        self.face_on_reff = self.reff_interpolators[halo_key](0,0)
+        #print(self.face_on_reff)
+        a_eval = 3*self.face_on_reff
+        assert np.isfinite(a_eval), f'invalid face-on reff for {halo_key}: {a_eval}'
+
+
+        rbins = halo_data['rbins']
+        a_s_func = halo_data['a_s']
+        b_s_func = halo_data['b_s']
+        c_s_func = halo_data['c_s']
+        # if a_eval > rbins[-1]:
+        #     #check if they are somewhat close, we can keep if so.
+        #     if a_eval * 0.9 < rbins[-1]:
+        #         a_eval *= 0.9
+        # assert rbins[0] < a_eval < rbins[-1], f'a_eval not in range of rbins r_min={rbins[0]:.2f},r_max={rbins[-1]:.2f}, a_eval={a_eval:.2f}, {halo_key}'
+
+        r, a, b, c = shape_at_semi_major(a_s_func, b_s_func, c_s_func, a_eval,rbins)
+        halo_data['ba_s'] = b/a
+        halo_data['ca_s'] = c/a
+        halo_data['a_s'] = a
+
+
+        rbins_i = halo_data['rbins_i']
+        a_s_func_i = halo_data['a_s_i']
+        b_s_func_i = halo_data['b_s_i']
+        c_s_func_i = halo_data['c_s_i']
+        # if a_eval > rbins[-1]:
+        #     #check if they are somewhat close, we can keep if so.
+        #     if a_eval * 0.9 < rbins[-1]:
+        #         a_eval *= 0.9
+        # assert rbins[0] < a_eval < rbins[-1], f'a_eval not in range of rbins r_min={rbins[0]:.2f},r_max={rbins[-1]:.2f}, a_eval={a_eval:.2f}, {halo_key}'
+
+        r, a, b, c = shape_at_semi_major(a_s_func_i, b_s_func_i, c_s_func_i, a_eval, rbins_i)
+
+
+        halo_data['ba_s_i'] = b/a
+        halo_data['ca_s_i'] = c/a
+        halo_data['a_s_i'] = a
+        assert np.abs(a-a_eval)/a_eval < 0.4, f'error between requested and available semi-major axis too large: {np.abs(a-a_eval)/a_eval}'
+
+            #print(f'Warning, large error in a_eval {a:.2f}, {a_eval:.2f} {halo_key}')
+        assert np.isfinite(b/a), f'invalid interpolated shape for {halo_key}: {rbins, b/a, c/a, a_eval}'
+        self.halo_data[halo_key] = halo_data
+
+
 
     def create_reff_dict(self,halo_data,sim_name,halo_id):
         thetas, phis = extract_floats(list(halo_data.keys()))
@@ -813,9 +1330,9 @@ class GalaxyEllipseCollection:
     def copy_halo_from(self, other_collection, sim_name, halo_id):
         """Copy a halo and its prebuilt interpolator from another collection."""
         halo_key = (sim_name, halo_id)
-        self.halos[halo_key] = other_collection.halos[halo_key]
+        #self.halos[halo_key] = other_collection.halos[halo_key]
         self.interpolators[halo_key] = other_collection.interpolators[halo_key]
-        self.halo_data[halo_key] = other_collection.halos[halo_key]
+        self.halo_data[halo_key] = other_collection.halo_data[halo_key]
         self.reff_interpolators[halo_key] = other_collection.reff_interpolators[halo_key]
 
     def generate_q_distribution_single_halo(self, sim_name, halo_id, n_angles):
@@ -831,13 +1348,13 @@ class GalaxyEllipseCollection:
             array: q values (axis ratios) for the specified halo
         """
         halo_key = (sim_name, halo_id)
-        if halo_key not in self.halos:
+        if halo_key not in self.halo_data:
             raise KeyError(f"Halo {halo_id} from simulation {sim_name} not found in collection")
 
         interpolator = self.interpolators[halo_key]
         reff_interpolator = self.reff_interpolators[halo_key]
         phi,theta = random_viewing_angles(n_angles)
-        e = interpolator(theta,phi)[:,self.reff_index]
+        e = interpolator(theta,phi)#[:,self.reff_index]
         q_values = 1 - e
         reff_values = reff_interpolator(theta, phi)
 
@@ -856,7 +1373,7 @@ class GalaxyEllipseCollection:
         Returns:
             array: q values (axis ratios) from all halos
         """
-        if not self.halos:
+        if not self.halo_data:
             raise ValueError("No halos in collection")
 
         q_values = []
@@ -864,17 +1381,18 @@ class GalaxyEllipseCollection:
         i = 0
         j = 0
         
-        for halo_key in self.halos.keys():
+        for halo_key in self.halo_data.keys():
             interpolator = self.interpolators[halo_key]
             reff_interpolator = self.reff_interpolators[halo_key]
             # Generate random viewing angles for this halo
             phi, theta = random_viewing_angles(angles_per_halo)
             # Get q values for each angle
             try:
-                e = interpolator(theta,phi)[:,self.reff_index]
+                e = interpolator(theta,phi)#[:,self.reff_index]
                 q = 1 - e
                 q_values.extend(q)
-                reff_values.extend(reff_interpolator(theta,phi))
+                reffs = reff_interpolator(theta, phi)
+                reff_values.extend(reffs)
                 i = i + 1
             except Exception as ex:
                 print(f"Error generating q values for halo {halo_key}: {ex}")
@@ -888,18 +1406,19 @@ class GalaxyEllipseCollection:
             raise ValueError(f"q values for halo {halo_key} are not nan")
         if np.any(np.isnan(reff_values)):
             raise ValueError(f"reff_values for halo {halo_key} are not nan")
+        a_obs=np.array(reff_values)*self.radius
 
-        return np.array(q_values), np.log(np.array(reff_values)) + 2
+        return np.array(q_values), np.log10(a_obs)+3 #get radius we want, then add 2 to make sure all positive
 
     def generate_q_distribution_all_halos_sideon(self):
-        if not self.halos:
+        if not self.halo_data:
             raise ValueError("No halos in collection")
 
         q_values = []
         i = 0
         j = 0
         sideon_orientations = [f'x090y{i:03d}' for i in np.arange(0, 330, 30)]
-        for halo_key in self.halos.keys():
+        for halo_key in self.halo_data.keys():
             halo_data = self.halo_data[halo_key]
             e = np.nanmax([halo_data[orientation][self.reff_index] for orientation in sideon_orientations])
             q = 1 - e
@@ -912,11 +1431,132 @@ class GalaxyEllipseCollection:
 
         return np.array(q_values)
     
+
+    def run_or_load_inference(self, output_dir, output_prefix,
+                              q_input=None, a_input=None,
+                              generate_q=False, n_angles_per_halo=100,
+                              multivariate=False, init_params=None,
+                              n_walkers=32, n_steps=3000, burn_in=500,
+                              n_cores=None, contain=True,
+                              force_rerun=False, save_q_obs=False,
+                              plot=True, plot_dir=None, plot_prefix=None,
+                              plot_burn_in=None,
+                              q_plot_key='q_obs', a_plot_key=None,
+                              q_model_from_fit=False, q_model_n=None,
+                              **plot_kwargs):
+        """
+        Load cached inference results if they exist, otherwise run the MCMC and
+        cache them, then plot.
+
+        Parameters:
+            output_dir (str/Path): Where the .pkl / .npy live and are written.
+            output_prefix (str): Prefix used by check_existing_results and the pickle.
+            q_input, a_input (array): Arrays to fit. Ignored when generate_q=True
+                or when a cached result is found.
+            generate_q (bool): Call self.generate_q_distribution_all_halos instead
+                of using q_input/a_input.
+            n_angles_per_halo (int): Only used when generate_q=True.
+            multivariate (bool): Use infer_intrinsic_shape_multivariate (7-param)
+                instead of infer_intrinsic_shape (4-param).
+            init_params (array): Starting parameters for the multivariate fit.
+            save_q_obs (bool): Also write "<prefix>_q_obs.npy".
+            plot (bool): Call self.plot_results at the end.
+            plot_dir, plot_prefix, plot_burn_in: Override output_dir / output_prefix
+                / burn_in for the plots only. Default to the run values.
+            q_plot_key, a_plot_key (str): Which plot_results argument the fitted
+                q / a arrays should be passed as ('q_obs' vs 'q_true', 'a_obs').
+            q_model_from_fit (bool): Regenerate q_model from the fitted
+                max-probability parameters before plotting.
+            q_model_n (int): Number of projections for q_model_from_fit. Defaults
+                to len(q_obs) as passed to the plot.
+            **plot_kwargs: Forwarded to plot_results (true_params, q_true, a_true,
+                label, color, intrinsic_data, labels, ...).
+
+        Returns:
+            (samples, max_prob_params, chain, q, a, sampler)
+        """
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        q, a = q_input, a_input
+
+        existing_results = None
+        if not force_rerun:
+            existing_results = check_existing_results(str(out_dir), output_prefix)
+
+        if existing_results:
+            samples, max_prob_params, chain, q, a, sampler = existing_results
+            print(f"Using existing inference results: {out_dir}/{output_prefix}")
+        else:
+            start_time = time.time()
+
+            if generate_q:
+                q, a = self.generate_q_distribution_all_halos(n_angles_per_halo)
+            assert len(q) == len(a), (
+                f'lengths of observed arrays do not match, q {len(q)}, a {len(a)}')
+
+            if save_q_obs:
+                np.save(out_dir / f"{output_prefix}_q_obs.npy", q)
+
+            sampler_args = (q, init_params, a) if multivariate else (q,)
+            sampler_fn = (infer_intrinsic_shape_multivariate if multivariate
+                          else infer_intrinsic_shape)
+            samples, max_prob_params, sampler = sampler_fn(
+                *sampler_args,
+                n_walkers=n_walkers,
+                n_steps=n_steps,
+                burn_in=burn_in,
+                n_cores=n_cores,
+                output_prefix=output_prefix,
+                output_dir=str(out_dir),
+                contain=contain
+            )
+
+            print(f"Inference completed in {time.time() - start_time:.2f} seconds")
+            chain = sampler.get_chain()
+            print(f"[{output_prefix}] max-probability parameters: {max_prob_params}")
+
+            results = {
+                'samples': samples,
+                'max_prob_params': max_prob_params,
+                'full_chain': chain,
+                'q_obs': q,
+                'a_obs': a,
+                'sampler': sampler,
+            }
+            with open(out_dir / f"{output_prefix}_results.pkl", 'wb') as f:
+                pickle.dump(results, f)
+
+        if plot:
+            plot_kwargs[q_plot_key] = q
+            if a_plot_key is not None:
+                plot_kwargs[a_plot_key] = a
+            #if q_model_from_fit:
+            n_model = q_model_n if q_model_n is not None else len(plot_kwargs['q_obs'])
+            q_model,_= sample_model_projections(max_prob_params, n_model)
+            plot_kwargs['q_model']=q_model
+            self.q_model=q_model
+
+
+            self.plot_results(
+                samples=samples,
+                max_prob_params=max_prob_params,
+                chain=chain,
+                burn_in=burn_in if plot_burn_in is None else plot_burn_in,
+                output_prefix=output_prefix if plot_prefix is None else plot_prefix,
+                output_dir=str(out_dir if plot_dir is None else plot_dir),
+                **plot_kwargs
+            )
+
+        return samples, max_prob_params, chain, q, a, sampler
+
+    # ------------------------------------------------------------------
     def run_inference_all_halos(self, n_angles_per_halo=100, weighted=False,
                                 n_walkers=32, n_steps=3000, burn_in=500, n_cores=None,
                                 output_prefix="all_halos", output_dir="results",
                                 force_rerun=False,
-                                label="All Halos Combined", color="blue"):
+                                label="All Halos Combined", color="blue",
+                                contain=True):
         """
         Run shape inference on a distribution from all halos.
 
@@ -925,181 +1565,149 @@ class GalaxyEllipseCollection:
         full_output_dir = Path(output_dir)
         full_output_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.run_covariances:
-            cov_output_dir = full_output_dir.with_name(full_output_dir.name + "_covariance")
-            cov_output_dir.mkdir(parents=True, exist_ok=True)
-            cov_prefix = f"{output_prefix}"
-
-        def _save_results(stage_dir, stage_prefix, samples, max_prob_params, chain,
-                          q_obs, reff_values, sampler):
-            results = {
-                'samples': samples,
-                'max_prob_params': max_prob_params,
-                'full_chain': chain,
-                'q_obs': q_obs,
-                'a_obs': reff_values,
-                'sampler': sampler,
-            }
-            with open(stage_dir / f"{stage_prefix}_results.pkl", 'wb') as f:
-                pickle.dump(results, f)
-
-        # Get true_params by averaging over all halos
+        # --- intrinsic shapes: true_params by averaging over all halos ---
         ba_s = []
         ca_s = []
         a_s = []
-        for halo_key in self.halos.keys():
-            halo_data = self.halos[halo_key]
+        ba_s_i = []
+        ca_s_i = []
+        a_s_i = []
+
+        for halo_key in self.halo_data.keys():
+            halo_data = self.halo_data[halo_key]
             ba_s.append(halo_data['ba_s'])
             ca_s.append(halo_data['ca_s'])
             a_s.append(halo_data['a_s'])
+            ba_s_i.append(halo_data['ba_s_i'])
+            ca_s_i.append(halo_data['ca_s_i'])
+            a_s_i.append(halo_data['a_s_i'])
         ba_s = np.array(ba_s)
         ca_s = np.array(ca_s)
-        a_s = np.log(np.array(a_s)) + 2
-        #print(ba_s, ca_s, a_s)
+        a_s = np.log10(np.array(a_s)) + 3
+        ba_s_i = np.array(ba_s_i)
+        ca_s_i = np.array(ca_s_i)
+        a_s_i = np.array(a_s_i) + 3
+
+        true_params, _ = fit_ellipsoid_params(ba_s, ca_s)
+
+        q_true = []
+        a_true = []
+        q_i_true = []
+        a_i_true = []
+        for i in range(len(ba_s)):
+            phi, theta = random_viewing_angles(n_angles_per_halo)
+            alpha, beta = projected_semi_axes(phi, theta, ba_s[i], ca_s[i])
+            q = beta / alpha
+            a = np.log10((10 ** (a_s[i] - 3) * np.sqrt(alpha * beta))) + 3
+            # q = project_ellipticity_xu(theta,phi)
+            q_true.extend(q)
+            a_true.extend(a)
+            alpha, beta = projected_semi_axes(phi, theta, ba_s[i], ca_s[i])
+            q = beta / alpha
+            a = np.log10((10 ** (a_s[i] - 3) * np.sqrt(alpha * beta))) + 3
+            q_i_true.extend(q)
+            a_i_true.extend(a)
+
+        if np.any(np.isnan(ba_s)):
+            print(f' nans found in shape array')
+            print(a_s)
+            print(ba_s)
+            print(ca_s)
+
         if self.run_covariances:
             theta_data = cov_fit(a_s, ba_s, ca_s)  # intrinsic shapes from the sim
             from shape_inference import attainable
             print(theta_data, attainable(theta_data))
 
-        existing_results = None
-        if not force_rerun:
-            existing_results = check_existing_results(str(full_output_dir), output_prefix)
-            if existing_results:
-                samples, max_prob_params, chain, q_obs, reff_values, sampler = existing_results
-                print("Using existing inference results for all halos combined")
+        if not is_color_like(color):
+            color = None
 
-        if force_rerun or not existing_results:
-            start_time = time.time()
-            q_obs, reff_values = self.generate_q_distribution_all_halos(n_angles_per_halo)
-            np.save(full_output_dir / f"{output_prefix}_q_obs.npy", q_obs)
+        # NOTE: in the original this name was read before ever being assigned
+        # (UnboundLocalError). None makes plot_results generate it internally.
+        q_model = None
 
-            samples, max_prob_params, sampler = infer_intrinsic_shape(
-                q_obs,
-                n_walkers=n_walkers,
-                n_steps=n_steps,
-                burn_in=burn_in,
-                n_cores=n_cores,
-                output_prefix=output_prefix,
-                output_dir=str(full_output_dir),
-            )
-            end_time = time.time()
-            print(f"Inference completed in {end_time - start_time:.2f} seconds")
+        # settings shared by all three runs / all three plots
+        mcmc = dict(n_walkers=n_walkers, n_steps=n_steps, burn_in=burn_in,
+                    n_cores=n_cores, contain=contain, force_rerun=force_rerun)
+        style = dict(label=label, color=color,intrinsic_data=(a_s, ba_s, ca_s))
 
-            chain = sampler.get_chain()
-            _save_results(full_output_dir, output_prefix, samples, max_prob_params,
-                          chain, q_obs, reff_values, sampler)
-
-            try:
-                tau = sampler.get_autocorr_time(quiet=True)
-                print(f"Autocorrelation times: {tau}")
-                print(f"Number of effective samples: {n_steps / np.max(tau)}")
-            except Exception as e:
-                print(f"Could not compute autocorrelation time (might need more samples): {e}")
-
-        if self.run_covariances:
-            existing_results_cov = None
-            if not force_rerun:
-                existing_results_cov = check_existing_results(str(cov_output_dir), cov_prefix)
-                if existing_results_cov:
-                    samples_cov, max_prob_params_cov, chain_cov, q_obs, reff_values, sampler = existing_results_cov
-                    print("Using existing inference results for all halos combined (covariance)")
-                    print(f'{cov_output_dir}\n{cov_prefix}')
-
-            if force_rerun or not existing_results_cov:
-                samples_cov, max_prob_params_cov, sampler = infer_intrinsic_shape_multivariate(
-                    q_obs, max_prob_params, reff_values,
-                    n_walkers=n_walkers,
-                    n_steps=n_steps,
-                    burn_in=burn_in,
-                    n_cores=n_cores,
-                    output_prefix=cov_prefix,
-                    output_dir=str(cov_output_dir),
-                )
-                chain_cov = sampler.get_chain()
-                print(max_prob_params_cov)
-                _save_results(cov_output_dir, cov_prefix, samples_cov, max_prob_params_cov,
-                              chain_cov, q_obs, reff_values, sampler)
-
-        ba_s_sigma = np.std(ba_s)
-        ca_s_sigma = np.std(ca_s)
-
-        mu_ba_s = np.mean(ba_s)
-        mu_ca_s = np.mean(ca_s)
-
-        true_params = np.array([mu_ba_s, mu_ca_s, ba_s_sigma, ca_s_sigma])
-
-        #q_true, _ = sample_model_projections(true_params, len(q_obs))
-        q_true = []
-        a_true = []
-        for i in range(len(ba_s)):
-            phi,theta=random_viewing_angles(n_angles_per_halo)
-            alpha,beta = projected_semi_axes(phi,theta,ba_s[i],ca_s[i])
-            q = beta/alpha
-            a = np.log(a_s[i])*np.sqrt(alpha*beta) + 2
-            # q = project_ellipticity_xu(theta,phi)
-            q_true.extend(q)
-            a_true.extend(a)
-        q_model, _ = sample_model_projections(max_prob_params, len(q_obs))
-
+        # --- 1. main 4-parameter run on the image q distribution ---
+        samples, max_prob_params, chain, q_obs, reff_values, sampler = self.run_or_load_inference(
+            full_output_dir, output_prefix,
+            generate_q=True, n_angles_per_halo=n_angles_per_halo, save_q_obs=True,
+            true_params=true_params, q_model=q_model, q_true=q_true,
+            **mcmc, **style,
+        )
         recovery_results = assess_parameter_recovery(
-            max_prob_params, true_params, q_obs=q_obs, q_model=q_model, q_true=q_true
+            max_prob_params, true_params, q_obs=q_obs, q_model=self.q_model, q_true=q_true
         )
         with open(full_output_dir / f"{output_prefix}_recovery.txt", 'w') as f:
             f.write(recovery_results['output_text'])
 
-        if not is_color_like(color):
-            color = None
-
-        self.plot_results(
-            samples=samples,
-            max_prob_params=max_prob_params,
-            true_params=true_params,
-            q_obs=q_obs,
-            q_model=q_model,
-            q_true=q_true,
-            chain=chain,
-            burn_in=burn_in,
-            label=label,
-            color=color,
-            output_prefix=output_prefix,
-            output_dir=str(full_output_dir),
-            intrinsic_data=(a_s, ba_s, ca_s),
-        )
-
+        # --- 2. 7-parameter covariance run ---
         if self.run_covariances:
-            mu_A, mu_b, mu_c, sigma_A, sigma_b, sigma_c, sigma_ac = cov_fit(a_s, ba_s, ca_s)
-            true_params_cov = np.array([mu_A, mu_b, mu_c, sigma_A, sigma_b, sigma_c, sigma_ac])
+            cov_output_dir = full_output_dir.with_name(full_output_dir.name + "_covariance")
+            true_params_cov = np.array(cov_fit(a_s, ba_s, ca_s))
 
-            #q_true_cov, a_true_cov = sample_model_projections(true_params_cov, 10000)
-            q_true_cov =  q_model
-            a_true_cov = a_true
-
-            print(max_prob_params_cov)
-            q_model_cov, a_model_cov = sample_model_projections(max_prob_params_cov, 10000)
-
-            self.plot_results(
-                samples=samples_cov,
-                max_prob_params=max_prob_params_cov,
-                true_params=true_params_cov,
-                q_obs=q_obs,
-                q_model=q_model_cov,
-                q_true=q_true_cov,
-                chain=chain_cov,  # the covariance chain, not the 4-param one
-                burn_in=burn_in,
-                label=label,
-                color=color,
-                output_prefix=output_prefix + '_covariance',
-                output_dir=str(full_output_dir) + '_covariance',
-                # 7-parameter extras (all optional)
-                a_obs=reff_values,
-                intrinsic_data=(a_s, ba_s, ca_s),
+            (samples_cov, max_prob_params_cov, chain_cov,
+             q_obs, reff_values, sampler_cov) = self.run_or_load_inference(
+                cov_output_dir, output_prefix,
+                generate_q=True, n_angles_per_halo=n_angles_per_halo,
+                multivariate=True, init_params=max_prob_params,
+                plot_dir=cov_output_dir, plot_prefix=output_prefix + '_covariance',
+                plot_burn_in=int(1 / 16 * burn_in),
+                a_plot_key='a_obs', q_model_from_fit=True, q_model_n=10000,
+                true_params=true_params_cov, q_true=q_true, a_true=a_true,
+                **{**mcmc, 'n_steps': int(n_steps / 10), 'burn_in': int(burn_in / 16)},
+                **style,
+            )
+            #recreate plot but use the luminosity based shapes as the true params!
+            true_params_cov_i = np.array(cov_fit(a_s_i, ba_s_i, ca_s_i))
+            style_i = dict(label=label, color=color, intrinsic_data=(a_s_i, ba_s_i, ca_s_i))
+            (samples_cov, max_prob_params_cov, chain_cov,
+             q_obs, reff_values, sampler_cov) = self.run_or_load_inference(
+                cov_output_dir, output_prefix, q_input=q_obs,
+                generate_q=False, n_angles_per_halo=n_angles_per_halo,
+                multivariate=True, init_params=max_prob_params,
+                plot_dir=cov_output_dir, plot_prefix=output_prefix+f'{self.band_key}3D_Shape_projections'+'_covariance',
+                plot_burn_in=int(1 / 16 * burn_in),
+                a_plot_key='a_obs', q_model_from_fit=True, q_model_n=10000,
+                true_params=true_params_cov_i, q_true=q_i_true, a_true=a_i_true,
+                **{**mcmc, 'n_steps': int(n_steps / 10), 'burn_in': int(burn_in / 16)},
+                **style_i,
             )
 
-        
+        # --- 3. what the model predicts when directly deprojecting the intrinsic 3D shape ---
+        # true_params here are what the MCMC returns when applied to the images, and
+        # max_prob_params are what it returns when applied directly to projections of
+        # the intrinsic shape, so the default legend text is wrong for this panel.
+        q_true = np.array(q_true)
+        prefix_3d = output_prefix + f'{self.band_key}3D_Shape_projections'
+        labels_3d = {
+            'obs': 'Synthetic Observed',
+            'model': 'Model from 3D-projection fit',
+            'true': 'Projections of intrinsic 3D shapes',
+            'q_true': 'Projections of intrinsic 3D shapes',
+            'intrinsic': 'Image Model',
+            'inferred': '3D Shape Model',
+        }
+
+        # (samples_true_q, max_prob_params_true, chain_true,
+        #  q_true, a_true, sampler_true) = self.run_or_load_inference(
+        #     full_output_dir, prefix_3d,
+        #     q_input=q_true, a_input=a_true,
+        #     q_plot_key='q_true', q_model_from_fit=True,
+        #     true_params=max_prob_params, q_obs=q_obs, labels=labels_3d,
+        #     **mcmc, **style,
+        # )
+
+        return true_params,true_params_cov, max_prob_params, max_prob_params_cov,
+
     def plot_results(self, samples, max_prob_params, q_obs, q_model=None, q_true=None,
                      true_params=None, chain=None, burn_in=500, label="Model",
                      color="blue", output_prefix=None, output_dir="results",
-                     a_obs=None, intrinsic_data=None, bin_width=0.04):
+                     a_obs=None, a_true=None, intrinsic_data=None, bin_width=0.04,
+                     labels=None):
         """
         Plot inference results with model comparison.
 
@@ -1123,7 +1731,21 @@ class GalaxyEllipseCollection:
             intrinsic_data (tuple): (a, b, c) intrinsic arrays to compare against
                 the model shape distribution. 7-parameter runs only.
             bin_width (float): Histogram bin width for the projection plots
+            labels (dict): Overrides for the legend/axis text. Recognised keys:
+                'obs', 'model', 'true', 'q_true', 'intrinsic'. Anything not given
+                falls back to the defaults below.
         """
+        # =====================================================================
+        default_labels = {
+            'obs': 'Synthetic Observed',
+            'model': 'Model',
+            'true': 'True',
+            'intrinsic': 'Intrinsic Distribution',
+            'inferred': 'Model Distribution',
+        }
+
+        labels = {**default_labels, **(labels or {})}
+
         if output_prefix is None:
             output_prefix = label.lower().replace(" ", "_")
 
@@ -1147,18 +1769,34 @@ class GalaxyEllipseCollection:
             q_model_list=None if q_model is None else [q_model],
             q_true_list=None if q_true is None else [q_true],
             output_file=path("projections_comparison"),
-            #title=f"Projected Axis Ratios: Observed vs Model for {label}",
+            # title=f"Projected Axis Ratios: Observed vs Model for {label}",
             bin_width=bin_width,
+            obs_label=labels['obs'],
+            model_label=labels['model'],
+            true_label=labels['true'],
         )
         plt.close(fig)
 
-        fig = plot_projected_distributions(
-            [q_obs], [label], [color],
-            output_file=path("projections_hist"),
-            #title=f"Projected Axis Ratios for {label}",
-            bin_width=bin_width, kde=False,
+        # Pass colour as a LIST. A bare string used to be zipped character-wise.
+        fig = plot_ellipsoid_shapes(
+            [samples], [max_prob_params], [true_params], [label], [color],
+            output_file=path("ellipsoid_shapes"),
+            # title=f"Intrinsic Shapes: {label}",
+            kf_key=f'{self.radius}R_eff',
+            focus_on_max_prob=True,
+            intrinsic_data=intrinsic_data,
+            intrinsic_label=labels['intrinsic'],
+            inferred_label=labels['inferred'],
         )
         plt.close(fig)
+
+        # fig = plot_projected_distributions(
+        #     [q_obs], [label], [color],
+        #     output_file=path("projections_hist"),
+        #     #title=f"Projected Axis Ratios for {label}",
+        #     bin_width=bin_width, kde=False,
+        # )
+        # plt.close(fig)
 
         # --- corner -----------------------------------------------------------
         fig = plot_corner(
@@ -1178,23 +1816,15 @@ class GalaxyEllipseCollection:
             plt.close(fig)
 
         # --- intrinsic shape plane -------------------------------------------
-        # Pass colour as a LIST. A bare string used to be zipped character-wise.
-        fig = plot_ellipsoid_shapes(
-            [samples], [max_prob_params], [true_params], [label], [color],
-            output_file=path("ellipsoid_shapes"),
-            #title=f"Intrinsic Shapes: {label}",
-            focus_on_max_prob=True,
-            intrinsic_data=intrinsic_data,
-        )
-        plt.close(fig)
 
-        fig = plot_ellipsoid_shapes(
-            [samples], [max_prob_params], [true_params], [label], ["blue"],
-            output_file=path("ellipsoid_shapes_all"),
-            #title=f"Intrinsic Shapes: {label}",
-            focus_on_max_prob=False, show_samples=True, show_ellipses=False,
-        )
-        plt.close(fig)
+
+        # fig = plot_ellipsoid_shapes(
+        #     [samples], [max_prob_params], [true_params], [label], ["blue"],
+        #     output_file=path("ellipsoid_shapes_all"),
+        #     #title=f"Intrinsic Shapes: {label}",
+        #     focus_on_max_prob=False, show_samples=True, show_ellipses=False,
+        # )
+        # plt.close(fig)
 
         # --- 7-parameter extras ----------------------------------------------
         if ndim == 7:
@@ -1204,7 +1834,7 @@ class GalaxyEllipseCollection:
 
             # Intrinsic A / B/A / C/A marginals, the shape plane, and the
             # A - C/A covariance panel where sigma_ac shows up.
-            fig = plot_shape_distribution(
+            fig = plot_covariant_distribution(
                 params=max_prob_params,
                 a_data=a_data, b_data=b_data, c_data=c_data,
                 label=label, color=color,
@@ -1221,14 +1851,25 @@ class GalaxyEllipseCollection:
                 #title=f"Projected Axis Ratio: {label}",
             )
             plt.close(fig)
+            q_model_cov,a_model_cov = sample_model_projections(max_prob_params)
+            fig = plot_projected_distributions_with_model(
+                [a_obs], None, None, [label], [color],
+                q_model_list=[a_model_cov],
+                q_true_list=[a_true],
+                output_file=path("projections_comparison_a_obs_cov"),
+                # title=f"Projected Axis Ratios: Observed vs Model for {label}",
+                bin_width=bin_width,
+                type='a'
+            )
+            plt.close(fig)
 
             p = unpack_params(max_prob_params)
             rho = p['sigma_ac'] / (p['sigma_A'] * p['sigma_C'])
             print(f"  sigma_ac = {p['sigma_ac']:.4f}  ->  rho_ac = {rho:+.3f} "
                   f"(bound |sigma_ac| < {p['sigma_A'] * p['sigma_C']:.4f})")
-            if abs(rho) > 0.9:
-                print("  WARNING: correlation is close to degenerate; the rejection "
-                      "sampler will have a low acceptance rate.")
+            # if abs(rho) > 0.9:
+            #     print("  WARNING: correlation is close to degenerate; the rejection "
+            #           "sampler will have a low acceptance rate.")
 
             if a_obs is not None:
                 print(f"  observed sizes: median a = {np.median(a_obs):.3f}")
@@ -1324,7 +1965,7 @@ class GalaxyEllipseCollection:
                 print(f"Could not compute autocorrelation time (might need more samples): {e}")
 
         # get true_params from halo_data
-        halo_data = self.halos[(sim_name, halo_id)]
+        halo_data = self.halo_data[(sim_name, halo_id)]
         ba_s = halo_data['ba_s']
         ca_s = halo_data['ca_s']
         a_s = halo_data['a_s']
@@ -1354,15 +1995,398 @@ class GalaxyEllipseCollection:
             output_dir=str(full_output_dir)
         )
 
-        return samples, max_prob_params, sampler, q_obs
+        return samples, max_prob_params, sampler, q_obs, a_s, ba_s, ca_s
 
     def get_all_halo_keys(self):
         """Return a list of all (sim_name, halo_id) keys in the collection."""
-        return list(self.halos.keys())
+        return list(self.halo_data.keys())
 
     def get_halo_count(self):
         """Return the number of halos in the collection."""
-        return len(self.halos)
+        return len(self.halo_data)
+
+    # ------------------------------------------------------------------
+    def _intrinsic_truth(self, n_angles_per_halo=200, seed=None, log_offset=3):
+        """
+        Intrinsic shapes, the 4-param truth, and projections of the 3D shapes.
+        Same logic as the start of run_inference_all_halos (which could call
+        this instead), except a_true uses the same log offset as a_s.
+        """
+        keys = list(self.halo_data.keys())
+        ba_s = np.array([self.halo_data[k]['ba_s'] for k in keys], dtype=float)
+        ca_s = np.array([self.halo_data[k]['ca_s'] for k in keys], dtype=float)
+        a_lin = np.array([self.halo_data[k]['a_s'] for k in keys], dtype=float)
+        a_s = np.log10(a_lin) + log_offset
+        true_params, _ = fit_ellipsoid_params(ba_s, ca_s)
+
+        state = np.random.get_state()
+        if seed is not None:
+            np.random.seed(seed)
+        try:
+            q_true, a_true = [], []
+            for b, c, al in zip(ba_s, ca_s, a_lin):
+                phi, theta = random_viewing_angles(n_angles_per_halo)
+                alpha, beta = projected_semi_axes(phi, theta, b, c)
+                q_true.append(beta / alpha)
+                a_true.append(np.log10(al * np.sqrt(alpha * beta)) + log_offset)
+        finally:
+            if seed is not None:
+                np.random.set_state(state)
+
+        return dict(ba_s=ba_s, ca_s=ca_s, a_s=a_s, true_params=true_params,
+                    q_true=np.concatenate(q_true), a_true=np.concatenate(a_true))
+
+    # ------------------------------------------------------------------
+    def _draw_single_angle_sample(self, angle_seed, halo_keys):
+        """One random viewing angle per halo -> (q, log10(a)+3), each of length N_halos."""
+        state = np.random.get_state()
+        np.random.seed(angle_seed)
+
+        phi, theta = random_viewing_angles(len(halo_keys))
+
+        np.random.set_state(state)
+
+        q = np.empty(len(halo_keys))
+        reff = np.empty(len(halo_keys))
+        for k, key in enumerate(halo_keys):
+            th, ph = theta[k:k + 1], phi[k:k + 1]
+            q[k] = 1 - np.atleast_1d(self.interpolators[key](th, ph))[self.reff_index]
+            reff[k] = np.atleast_1d(self.reff_interpolators[key](th, ph))[self.reff_index]
+        #
+        # bad = ~np.isfinite(q) | ~np.isfinite(reff)
+        # if np.any(bad):
+        #     raise ValueError(f'non-finite q/reff for halos '
+        #                      f'{[halo_keys[k] for k in np.where(bad)[0]]} (seed {angle_seed})')
+        return q, np.log10(reff * self.radius) + 3
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _save_bootstrap(store, path):
+        tmp = path.with_suffix('.tmp')
+        with open(tmp, 'wb') as f:
+            pickle.dump(store, f)
+        os.replace(tmp, path)  # atomic: a crash never leaves a half-written file
+
+    @staticmethod
+    def _load_bootstrap(path, config):
+        with open(path, 'rb') as f:
+            store = pickle.load(f)
+        old = store['config']
+        diffs = sorted(k for k in set(old) | set(config) if old.get(k) != config.get(k))
+        if diffs:
+            raise ValueError(
+                f'{path} was made with different settings ({diffs}). '
+                f'Use force_rerun=True or a new output_prefix.')
+        print(f'Loaded {len(store["results"])} existing bootstrap iterations from {path}')
+        return store
+
+    @staticmethod
+    def _collect_bootstrap(store, n_bootstrap, fit_key):
+        res = [store['results'][i] for i in sorted(store['results']) if i < n_bootstrap]
+        ok = [r for r in res if fit_key in r]
+        if not ok:
+            return None
+        fit = {k: np.array([r[fit_key][k] for r in ok]) for k in ok[0][fit_key]}
+        fit['q_obs'] = np.array([r['q'] for r in ok])
+        fit['a_obs'] = np.array([r['a'] for r in ok])
+        fit['index'] = np.array([r['i'] for r in ok])
+        fit['n_failed'] = len(res) - len(ok)
+        return fit
+
+
+    def plot_bootstrap_vs_reference(self,
+                                    fit_key='fit4',
+                                    show_truth=True,
+                                    point_estimate='map',
+                                    **kwargs):
+        """
+        Ellipse plot of a bootstrap run (self.bootstrap by default) against the
+        many-angle run.
+
+        fit_key : 'fit4' or 'fit7'
+        reference_dir, reference_prefix : the output_dir / output_prefix you gave
+            run_inference_all_halos. The 7-param reference is read from
+            <reference_dir>_covariance, as that function writes it. If omitted,
+            the reference stored in `boot` is used (params only, no samples).
+        **kwargs : forwarded to plot_bootstrap_ellipses (n_ellipses, n_sigma,
+            ref_color, boot_label, ref_label, annotate, show_contours, ...).
+        """
+        boot = self.bootstrap
+        output_dir_boot = boot['output_dir']
+        output_file = output_dir_boot + f'/bootstrap{fit_key}_ellipses.png'
+        fit = boot[fit_key]
+        if fit is None:
+            raise ValueError(f'no {fit_key} results in this bootstrap run')
+
+        ref_params = boot['reference_params'][fit_key]
+
+        truth = boot['truth']
+        true_params=boot['true_params'][fit_key]
+        # if output_file is None:
+        #     output_file = str(Path(boot['output_dir']) /
+        #                       f'{boot["output_prefix"]}{self.band_key}_bootstrap_'
+        #                       f'{fit_key[-1]}p_ellipses_vs_reference.png')
+
+        return plot_bootstrap_ellipses(
+            fit[point_estimate], reference_params=ref_params,
+            true_params=true_params, show_truth=show_truth,
+            intrinsic_data=(truth['a_s'], truth['ba_s'], truth['ca_s']),
+            kf_key=f'{self.radius}R_eff', output_file=output_file,ref_label = '',
+            **kwargs)
+    # ------------------------------------------------------------------
+    def run_bootstrap_inference(self,output_dir, n_bootstrap=200,
+                                output_prefix='all_halos',
+                                multivariate=True, mcmc_4=None, mcmc_7=None,
+                                init_from='map', contain=True,
+                                n_workers=None, seed=12345, n_keep=400,
+                                save=True, save_every=10, force_rerun=False,
+                                retry_failed=False,
+                                reference_dir=None, reference_prefix=None,
+                                n_angles_truth=200,
+                                plot=True,
+                                true_params=None,
+                                true_params_cov=None,
+                                max_prob_params=None,
+                                max_prob_params_cov=None,
+                                **plot_kwargs):
+        """
+        Bootstrap over viewing angles: n_bootstrap realisations, each with ONE
+        random viewing angle per galaxy (the galaxy set itself is fixed).
+
+        Parameters
+        ----------
+        n_bootstrap : int
+            Number of realisations. Increasing it later reuses saved iterations
+            and only runs the new ones.
+        mcmc_4, mcmc_7 : dict
+            n_walkers / n_steps / burn_in for the 4- and 7-parameter fits.
+        init_from : 'map' or 'median'
+            Which 4-param estimate warm-starts the 7-param fit.
+        n_workers : int or None
+            Parallel processes, one bootstrap iteration each. None/1 = serial.
+        seed : int
+            Iteration i uses SeedSequence([seed, i]), so results are reproducible
+            and resuming gives the same answer as one uninterrupted run.
+        n_keep : int
+            Thinned posterior samples kept per iteration.
+        save, save_every : bool, int
+            Save to <output_dir>/<output_prefix>_bootstrap.pkl every save_every
+            completed iterations, on Ctrl-C, and at the end.
+        force_rerun : bool
+            Ignore (and overwrite) the saved file.
+        retry_failed : bool
+            Rerun iterations that previously raised an error.
+        reference_dir, reference_prefix :
+            Location of your existing many-angle run (the output_dir /
+            output_prefix given to run_inference_all_halos), overplotted
+            as the "reference" result.
+        n_angles_truth : int
+            Angles per halo used to project the intrinsic 3D shapes (q_true).
+        **plot_kwargs : forwarded to plot_bootstrap_results.
+
+        Returns
+        -------
+        dict (also stored as self.bootstrap) with keys 'fit4', 'fit7'
+        (per-iteration arrays), 'true_params', 'reference_params', 'truth', ...
+        """
+        multivariate=False
+        mcmc_4 = {**dict(n_walkers=16, n_steps=1000, burn_in=750), **(mcmc_4 or {})}
+        mcmc_7 = {**dict(n_walkers=4, n_steps=200, burn_in=100), **(mcmc_7 or {})}
+
+        out_dir_boot = Path(output_dir) / 'bootstrap'
+        out_dir_boot.mkdir(parents=True, exist_ok=True)
+        path = out_dir_boot / f'{output_prefix}_bootstrap.pkl'
+
+        print("[boot] output_dir        :", output_dir)
+        print("[boot] output_prefix     :", output_prefix)
+        print("[boot] reference_dir     :", reference_dir)
+        print("[boot] reference_prefix  :", reference_prefix)
+        print("[boot] band_key          :", repr(self.band_key))
+        print("[boot] bootstrap pkl     :", path)
+        for d in (Path(output_dir), Path(output_dir).with_name(Path(output_dir).name + '_covariance')):
+            print(f"[boot] {d} exists={d.exists()}")
+            if d.exists():
+                print("        results pkls:", sorted(p.name for p in d.glob('*_results.pkl')))
+
+        halo_keys = list(self.halo_data.keys())
+        config = dict(halo_keys=halo_keys, radius=self.radius, reff_index=self.reff_index,
+                      band_key=self.band_key, multivariate=multivariate,
+                      mcmc_4=mcmc_4, mcmc_7=mcmc_7 if multivariate else None,
+                      init_from=init_from, contain=contain, seed=seed, n_keep=n_keep)
+
+        store = None
+        if not force_rerun and path.exists():
+            store = self._load_bootstrap(path, config)
+        if store is None:
+            store = {'config': config, 'results': {}}
+
+        done = {i for i, r in store['results'].items()
+                if r['error'] is None or not retry_failed}
+        todo = [i for i in range(n_bootstrap) if i not in done]
+
+        if todo:
+            cfg = dict(contain=contain, mcmc_4=mcmc_4, mcmc_7=mcmc_7,
+                       multivariate=multivariate, init_from=init_from, n_keep=n_keep)
+            tasks = []
+            for i in todo:
+                angle_seed, mcmc_seed = np.random.SeedSequence([seed, i]).generate_state(2)
+                q, a = self._draw_single_angle_sample(int(angle_seed), halo_keys)
+                tasks.append((i, int(mcmc_seed), q, a, cfg))
+
+            print(f'Running {len(tasks)} bootstrap iterations '
+                  f'({len(halo_keys)} galaxies, {"4+7" if multivariate else "4"}-param, '
+                  f'{n_workers or 1} worker(s))')
+            t0 = time.time()
+            try:
+                if n_workers is not None and n_workers > 1:
+                    with Pool(processes=n_workers) as pool:
+                        self._consume_bootstrap(
+                            pool.imap_unordered(_bootstrap_worker, tasks, chunksize=1),
+                            store, path, save, save_every, len(tasks), t0)
+                else:
+                    self._consume_bootstrap(map(_bootstrap_worker, tasks),
+                                            store, path, save, save_every, len(tasks), t0)
+            finally:  # also runs on Ctrl-C
+                if save:
+                    self._save_bootstrap(store, path)
+
+        failed = [r for i, r in store['results'].items() if i < n_bootstrap and r['error']]
+        if failed:
+            print(f'{len(failed)} iterations raised errors, e.g. #{failed[0]["i"]}: '
+                  f'{failed[0]["error"]}')
+
+        truth = self._intrinsic_truth(n_angles_truth, seed=seed)
+
+
+        self.bootstrap = dict(
+            fit4=self._collect_bootstrap(store, n_bootstrap, 'fit4'),
+            fit7=self._collect_bootstrap(store, n_bootstrap, 'fit7') ,
+            true_params={'fit7':true_params_cov,'fit4':true_params},
+            reference_params={'fit7':max_prob_params_cov,'fit4':max_prob_params},
+            truth=truth, config=config,
+            output_dir=str(out_dir_boot), output_prefix=output_prefix,
+            reference_dir=str(reference_dir), reference_prefix=reference_prefix,
+        )
+
+        #print(self.bootstrap)
+        if plot:
+            self.plot_bootstrap_results(out_dir_boot, output_dir, output_prefix)
+        return self.bootstrap
+
+    @classmethod
+    def _consume_bootstrap(cls, iterator, store, path, save, save_every, total, t0):
+        n_done = n_err = 0
+        for res in iterator:
+            store['results'][res['i']] = res
+            n_done += 1
+            n_err += res['error'] is not None
+            if n_done % save_every == 0 or n_done == total:
+                el = time.time() - t0
+                print(f'  [{n_done}/{total}] {el / 60:.1f} min elapsed, '
+                      f'~{el / n_done * (total - n_done) / 60:.1f} min left, {n_err} failed')
+                if save:
+                    cls._save_bootstrap(store, path)
+
+    # ------------------------------------------------------------------
+    def plot_bootstrap_results(self, output_dir_boot,output_dir,output_prefix, point_estimate='map',
+                               label='Bootstrap', color='C0', bin_width=0.04,
+                               n_band_curves=100, n_model=5000,
+                               ):
+        """
+        Figures + summary table for each fit in `boot` (default self.bootstrap).
+        point_estimate : 'median' (posterior median, more stable) or 'map'.
+        """
+        boot = self.bootstrap
+        #out_dir = Path(boot['output_dir'])
+        out_dir = output_dir_boot
+        truth = boot['truth']
+        intrinsic = (truth['a_s'], truth['ba_s'], truth['ca_s'])
+        rng = np.random.default_rng(boot['config']['seed'])
+
+        for fit_key in ('fit4', 'fit7'):
+            fit = boot.get(fit_key)
+            if fit is None:
+                continue
+            ndim = FIT_NDIM[fit_key]
+            tag = f'{boot["output_prefix"]}{self.band_key}_bootstrap_{ndim}p'
+
+            path = lambda name: str(out_dir / f'{tag}_{name}.png')
+            tp = boot['true_params'][fit_key]
+            rp = boot['reference_params'][fit_key]
+            print(f"[plot] fit_key={fit_key} ndim={ndim} tag={tag}")
+            print(f"[plot] rp is None: {rp is None}, tp is None: {tp is None}")
+            print(f"[plot] ellipse path -> {path('ellipse')}")
+            #print(fit)
+            #print(point_estimate)
+            pts = fit[point_estimate]
+            ttl = ''#f'{label}: {len(pts)} single-angle realisations ({ndim}-param)'
+
+            # # 1. corner of point estimates, and of the pooled posteriors
+            # print(f'corner_plot_info{rp},{tp}')
+            # fig = plot_corner(pts, max_prob_params=rp, true_params=tp,
+            #                   output_file=path('corner_estimates'),
+            #                   title=f'{ttl} — {point_estimate}s')
+            # plt.close(fig)
+            # fig = plot_corner(fit['thinned'].reshape(-1, ndim), max_prob_params=rp,
+            #                   true_params=tp, output_file=path('corner_pooled_posterior'),
+            #                   title=f'{ttl} — pooled posteriors')
+            # plt.close(fig)
+            #
+            # # 2. marginals: scatter of estimates vs typical posterior width
+            # fig = plot_bootstrap_marginals(fit, point_estimate, tp, rp, color,
+            #                                output_file=path('marginals'), title=ttl)
+            # plt.close(fig)
+            #
+            # # 3. shape plane
+            # fig = plot_bootstrap_shape_plane(fit, point_estimate, tp, rp, intrinsic, color,
+            #                                  output_file=path('shape_plane'), title=ttl)
+            # plt.close(fig)'{tag}.png'
+            fig = self.plot_bootstrap_vs_reference(fit_key=fit_key,)
+            plt.close(fig)
+            # fig = self.plot_bootstrap_vs_reference(boot, 'fit7', show_truth=False,
+            #                                  reference_dir='Marvel.DC.results', reference_prefix='all_galaxies.radius2.contained.False')
+            # plt.close(fig)
+
+            # 4. calibration against truth and against the many-angle reference
+            calib = {}
+            for name, target in [('truth', tp), ('reference', rp)]:
+                if target is None:
+                    continue
+                fig, calib[name] = plot_bootstrap_calibration(
+                    fit, target, name, point_estimate,
+                    output_file=path(f'calibration_{name}'), title=ttl)
+                plt.close(fig)
+
+            # 5. q (and a) distributions: bands over bootstrap models
+            sel = rng.choice(len(pts), size=min(n_band_curves, len(pts)), replace=False)
+            draws = [sample_model_projections(pts[k], n_model) for k in sel]
+            q_bins = np.arange(0, 1 + bin_width, bin_width)
+            fig = plot_bootstrap_hist_band(fit['q_obs'], [d[0] for d in draws], q_bins,
+                                           reference=truth['q_true'], xlabel='q = b/a',
+                                           color=color, output_file=path('q_band'), title=ttl)
+            plt.close(fig)
+            if ndim == 7:
+                lo, hi = np.percentile(np.concatenate([fit['a_obs'].ravel(), truth['a_true']]),
+                                       [0.5, 99.5])
+                a_bins = np.arange(lo, hi + bin_width, bin_width)
+                fig = plot_bootstrap_hist_band(fit['a_obs'], [d[1] for d in draws], a_bins,
+                                               reference=truth['a_true'],
+                                               xlabel=r'$\log_{10}$ a + 3', color=color,
+                                               output_file=path('a_band'), title=ttl)
+                plt.close(fig)
+
+            # # 6. MCMC diagnostics
+            # n_steps = boot['config'][f'mcmc_{ndim}']['n_steps']
+            # fig = plot_bootstrap_diagnostics(fit, n_steps, output_file=path('diagnostics'),
+            #                                  title=ttl)
+            # plt.close(fig)
+
+            # 7. summary table
+            text = bootstrap_summary_text(fit, point_estimate, tp, rp, calib)
+            text = f'{ttl}\n{fit["n_failed"]} failed iterations\n' + text
+            with open(out_dir / f'{tag}_summary.txt', 'w') as f:
+                f.write(text + '\n')
+            print(text)
 
 
 class SyntheticEllipseCollection(GalaxyEllipseCollection):
